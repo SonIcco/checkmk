@@ -3,7 +3,7 @@
 // conditions defined in the file COPYING, which is part of this source code package.
 
 use super::config;
-use crate::{certs, tls_server};
+use crate::certs;
 use anyhow::{anyhow, Context, Result as AnyhowResult};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -34,11 +34,11 @@ struct RegistrationWithALBody {
 
 pub fn pairing(
     server_address: &str,
-    root_cert: Option<String>,
+    root_cert: Option<&str>,
     csr: String,
     credentials: &config::Credentials,
 ) -> AnyhowResult<PairingResponse> {
-    let response = certs::client(root_cert.map(|cert_str| cert_str.into_bytes()))?
+    let response = certs::client(root_cert)?
         .post(format!("https://{}/pairing", server_address))
         .basic_auth(&credentials.username, Some(&credentials.password))
         .json(&PairingBody { csr })
@@ -76,7 +76,7 @@ pub fn register_with_hostname(
     host_name: &str,
 ) -> AnyhowResult<()> {
     check_response_204(
-        certs::client(Some(String::from(root_cert).into_bytes()))?
+        certs::client(Some(root_cert))?
             .post(format!("https://{}/register_with_hostname", server_address))
             .basic_auth(&credentials.username, Some(&credentials.password))
             .json(&RegistrationWithHNBody {
@@ -95,7 +95,7 @@ pub fn register_with_agent_labels(
     agent_labels: &config::AgentLabels,
 ) -> AnyhowResult<()> {
     check_response_204(
-        certs::client(Some(String::from(root_cert).into_bytes()))?
+        certs::client(Some(root_cert))?
             .post(format!("https://{}/register_with_labels", server_address))
             .basic_auth(&credentials.username, Some(&credentials.password))
             .json(&RegistrationWithALBody {
@@ -108,7 +108,7 @@ pub fn register_with_agent_labels(
 
 fn encode_pem_cert_base64(cert: &str) -> AnyhowResult<String> {
     Ok(base64::encode_config(
-        tls_server::certificate(cert)?.0,
+        certs::parse_pem(cert)?.contents,
         base64::URL_SAFE,
     ))
 }
@@ -121,7 +121,7 @@ pub fn agent_data(
     monitoring_data: &[u8],
 ) -> AnyhowResult<()> {
     check_response_204(
-        certs::client(Some(String::from(root_cert).into_bytes()))?
+        certs::client(Some(root_cert))?
             .post(format!(
                 "https://{}/agent_data/{}",
                 agent_receiver_address, uuid,
@@ -169,7 +169,7 @@ pub fn status(
     uuid: &str,
     certificate: &str,
 ) -> AnyhowResult<StatusResponse> {
-    let response = certs::client(Some(String::from(root_cert).into_bytes()))?
+    let response = certs::client(Some(root_cert))?
         .get(format!(
             "https://{}/registration_status/{}",
             server_address, uuid

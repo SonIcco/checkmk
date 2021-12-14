@@ -35,7 +35,7 @@ from cmk.gui.globals import config, html, output_funnel, request, user_errors
 from cmk.gui.htmllib import foldable_container, HTML
 from cmk.gui.i18n import _
 from cmk.gui.inventory import InventoryDeltaData, InventoryRows
-from cmk.gui.plugins.views import (
+from cmk.gui.plugins.views.utils import (
     ABCDataSource,
     Cell,
     cmp_simple_number,
@@ -53,10 +53,8 @@ from cmk.gui.plugins.views import (
     PainterOptions,
     register_painter,
     register_sorter,
-    render_labels,
     RowTable,
 )
-from cmk.gui.plugins.visuals import filter_registry, visual_info_registry, VisualInfo
 from cmk.gui.plugins.visuals.inventory import (
     FilterInvBool,
     FilterInvFloat,
@@ -64,12 +62,17 @@ from cmk.gui.plugins.visuals.inventory import (
     FilterInvtableText,
     FilterInvText,
 )
-from cmk.gui.plugins.visuals.utils import get_livestatus_filter_headers
+from cmk.gui.plugins.visuals.utils import (
+    filter_registry,
+    get_livestatus_filter_headers,
+    visual_info_registry,
+    VisualInfo,
+)
 from cmk.gui.type_defs import ColumnName, FilterName, Icon, Row, Rows
 from cmk.gui.utils.escaping import escape_html, escape_text
 from cmk.gui.utils.urls import makeuri_contextless
 from cmk.gui.valuespec import Checkbox, Dictionary
-from cmk.gui.view_utils import CellSpec
+from cmk.gui.view_utils import CellSpec, render_labels
 from cmk.gui.views.builtin_views import host_view_filters
 
 if TYPE_CHECKING:
