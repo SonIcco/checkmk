@@ -414,7 +414,7 @@ class ACTestOldDefaultCredentials(ACTest):
     def execute(self) -> Iterator[ACResult]:
         if (
             cmk.gui.plugins.userdb.htpasswd.HtpasswdUserConnector({}).check_credentials(
-                "omdadmin", "omd"
+                UserId("omdadmin"), "omd"
             )
             == "omdadmin"
         ):
@@ -663,7 +663,7 @@ class ACTestApacheNumberOfProcesses(ABCACApacheTest):
 
     def _get_average_process_size(self):
         try:
-            pid_file = Path(cmk.utils.paths.omd_root).joinpath("tmp/apache/run/apache.pid")
+            pid_file = cmk.utils.paths.omd_root / "tmp/apache/run/apache.pid"
             with pid_file.open(encoding="utf-8") as f:
                 ppid = int(f.read())
         except (IOError, ValueError):

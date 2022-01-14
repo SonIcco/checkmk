@@ -153,8 +153,8 @@ class KubeletInfo(BaseModel):
 class PodInfo(BaseModel):
     """section: kube_pod_info_v1"""
 
-    namespace: Namespace
-    creation_timestamp: CreationTimestamp
+    namespace: Optional[Namespace]
+    creation_timestamp: Optional[CreationTimestamp]
     labels: Labels  # used for host labels
     node: Optional[NodeName]  # this is optional, because there may be pods, which are not
     # scheduled on any node (e.g., no node with enough capacity is available).
@@ -199,15 +199,10 @@ class ContainerCount(BaseModel):
     terminated: int = 0
 
 
-class ContainerMemory(PerformanceContainer):
-    memory_usage_bytes: PerformanceMetric
-    memory_swap: PerformanceMetric
-
-
 class Memory(BaseModel):
     """section: k8s_live_memory_v1"""
 
-    containers: Sequence[ContainerMemory]
+    memory_usage_bytes: float
 
 
 class NodeInfo(BaseModel):
@@ -217,11 +212,6 @@ class NodeInfo(BaseModel):
     kernel_version: str
     os_image: str
     labels: Labels
-
-
-class Resources(BaseModel):
-    limit: float = float("inf")
-    requests: float = 0.0
 
 
 class StartTime(BaseModel):

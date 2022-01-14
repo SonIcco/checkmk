@@ -8,7 +8,6 @@
 #include <bitset>
 #include <cstdint>
 #include <map>
-#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -150,9 +149,13 @@ std::string TableLog::name() const { return "log"; }
 std::string TableLog::namePrefix() const { return "log_"; }
 
 void TableLog::answerQuery(Query *query) {
-    std::lock_guard<std::mutex> lg(_log_cache->_lock);
-    _log_cache->update();
-    if (_log_cache->empty()) {
+    _log_cache->apply([this, query](const LogFiles &log_files) {
+        answerQueryInternal(query, log_files);
+    });
+}
+
+void TableLog::answerQueryInternal(Query *query, const LogFiles &log_files) {
+    if (log_files.begin() == log_files.end()) {
         return;
     }
 
@@ -181,17 +184,17 @@ void TableLog::answerQuery(Query *query) {
        the Limit: header produces more reasonable results. */
 
     /* NEW CODE - NEWEST FIRST */
-    auto it = _log_cache->end();  // it now points beyond last log file
-    --it;  // switch to last logfile (we have at least one)
+    auto it = log_files.end();  // it now points beyond last log file
+    --it;                       // switch to last logfile (we have at least one)
 
     // Now find newest log where 'until' is contained. The problem
     // here: For each logfile we only know the time of the *first* entry,
     // not that of the last.
-    while (it != _log_cache->begin() && it->first > until) {
+    while (it != log_files.begin() && it->second->since() > until) {
         // while logfiles are too new go back in history
         --it;
     }
-    if (it->first > until) {
+    if (it->second->since() > until) {
         return;  // all logfiles are too new
     }
 
@@ -200,7 +203,7 @@ void TableLog::answerQuery(Query *query) {
                                 until)) {
             break;  // end of time range found
         }
-        if (it == _log_cache->begin()) {
+        if (it == log_files.begin()) {
             break;  // this was the oldest one
         }
         --it;

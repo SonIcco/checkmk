@@ -5,6 +5,7 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import ast
+import dataclasses
 import json
 import os
 import sys
@@ -13,9 +14,9 @@ from hashlib import sha256
 from typing import Any, Iterable, List, NamedTuple, Sequence, Set, Tuple
 
 import cmk.utils.rulesets.ruleset_matcher as ruleset_matcher
-from cmk.utils.type_defs import CheckPreviewEntry, HostOrServiceConditions, SetAutochecksTable
+from cmk.utils.type_defs import HostOrServiceConditions, SetAutochecksTable
 
-from cmk.automations.results import TryDiscoveryResult
+from cmk.automations.results import CheckPreviewEntry, TryDiscoveryResult
 
 import cmk.gui.gui_background_job as gui_background_job
 import cmk.gui.watolib as watolib
@@ -95,6 +96,29 @@ class DiscoveryResult(NamedTuple):
     vanished_labels: dict
     changed_labels: dict
 
+    def serialize(self) -> str:
+        return repr(
+            (
+                self.job_status,
+                self.check_table_created,
+                [dataclasses.astuple(cpe) for cpe in self.check_table],
+                self.host_labels,
+                self.new_labels,
+                self.vanished_labels,
+                self.changed_labels,
+            )
+        )
+
+    @classmethod
+    def deserialize(cls, raw: str) -> "DiscoveryResult":
+        job_status, check_table_created, raw_check_table, *rest = ast.literal_eval(raw)
+        return cls(
+            job_status,
+            check_table_created,
+            [CheckPreviewEntry(*cpe) for cpe in raw_check_table],
+            *rest,
+        )
+
 
 class DiscoveryOptions(NamedTuple):
     action: str
@@ -136,28 +160,20 @@ class Discovery:
         saved_services: Set[str] = set()
         apply_changes: bool = False
 
-        for (
-            table_source,
-            check_type,
-            _checkgroup,
-            item,
-            discovered_params,
-            _check_params,
-            descr,
-            _state,
-            _output,
-            _perfdata,
-            service_labels,
-            found_on_nodes,
-        ) in discovery_result.check_table:
+        for entry in discovery_result.check_table:
             # Versions >2.0b2 always provide a found on nodes information
             # If this information is missing (fallback value is None), the remote system runs on an older version
 
-            table_target = self._get_table_target(table_source, check_type, item)
-            key = check_type, item
-            value = descr, discovered_params, service_labels, found_on_nodes
+            table_target = self._get_table_target(entry)
+            key = entry.check_plugin_name, entry.item
+            value = (
+                entry.description,
+                entry.discovered_parameters,
+                entry.labels,
+                entry.found_on_nodes,
+            )
 
-            if table_source != table_target:
+            if entry.check_source != table_target:
                 if table_target == DiscoveryState.UNDECIDED:
                     user.need_permission("wato.service_discovery_to_undecided")
                 elif table_target in [
@@ -174,18 +190,18 @@ class Discovery:
                 apply_changes = True
 
             _apply_state_change(
-                table_source,
+                entry.check_source,
                 table_target,
                 key,
                 value,
-                descr,
+                entry.description,
                 autochecks_to_save,
                 saved_services,
                 add_disabled_rule,
                 remove_disabled_rule,
             )
 
-            if table_source in [DiscoveryState.MONITORED, DiscoveryState.IGNORED]:
+            if entry.check_source in [DiscoveryState.MONITORED, DiscoveryState.IGNORED]:
                 old_autochecks[key] = value
 
         if apply_changes:
@@ -339,38 +355,41 @@ class Discovery:
                 return rule
         return None
 
-    def _get_table_target(self, table_source, check_type, item):
+    def _get_table_target(self, entry: CheckPreviewEntry):
         if self._options.action == DiscoveryAction.FIX_ALL or (
             self._options.action == DiscoveryAction.UPDATE_SERVICES
-            and self._service_is_checked(check_type, item)
+            and self._service_is_checked(entry.check_plugin_name, entry.item)
         ):
-            if table_source == DiscoveryState.VANISHED:
+            if entry.check_source == DiscoveryState.VANISHED:
                 return DiscoveryState.REMOVED
-            if table_source == DiscoveryState.IGNORED:
+            if entry.check_source == DiscoveryState.IGNORED:
                 return DiscoveryState.IGNORED
-            # table_source in [DiscoveryState.MONITORED, DiscoveryState.UNDECIDED]
+            # entry.check_source in [DiscoveryState.MONITORED, DiscoveryState.UNDECIDED]
             return DiscoveryState.MONITORED
 
         update_target = self._discovery_info["update_target"]
         if not update_target:
-            return table_source
+            return entry.check_source
 
         if self._options.action == DiscoveryAction.BULK_UPDATE:
-            if table_source != self._discovery_info["update_source"]:
-                return table_source
+            if entry.check_source != self._discovery_info["update_source"]:
+                return entry.check_source
 
             if not self._options.show_checkboxes:
                 return update_target
 
-            if checkbox_id(check_type, item) in self._discovery_info["update_services"]:
+            if (
+                checkbox_id(entry.check_plugin_name, entry.item)
+                in self._discovery_info["update_services"]
+            ):
                 return update_target
 
         if self._options.action == DiscoveryAction.SINGLE_UPDATE:
-            varname = checkbox_id(check_type, item)
+            varname = checkbox_id(entry.check_plugin_name, entry.item)
             if varname in self._discovery_info["update_services"]:
                 return update_target
 
-        return table_source
+        return entry.check_source
 
     def _service_is_checked(self, check_type, item):
         return (
@@ -532,8 +551,7 @@ def execute_discovery_job(api_request: StartDiscoveryRequest) -> DiscoveryResult
     if job.is_active() and api_request.options.action == DiscoveryAction.STOP:
         job.stop()
 
-    r = job.get_result(api_request)
-    return r
+    return job.get_result(api_request)
 
 
 def _add_missing_discovery_result_fields(discovery_result: DiscoveryResult) -> DiscoveryResult:

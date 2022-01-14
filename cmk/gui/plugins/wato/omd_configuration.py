@@ -7,7 +7,6 @@
 import os
 import subprocess
 import traceback
-from pathlib import Path
 from typing import Any, Dict
 from typing import Optional as _Optional
 
@@ -50,7 +49,7 @@ from cmk.gui.valuespec import (
 @config_variable_group_registry.register
 class ConfigVariableGroupSiteManagement(ConfigVariableGroup):
     def title(self):
-        return _("Site Management")
+        return _("Site management")
 
     def sort_index(self):
         return 30
@@ -236,7 +235,7 @@ class ConfigVariableSiteNSCA(ConfigVariable):
 class ConfigDomainDiskspace(ABCConfigDomain):
     needs_sync = True
     needs_activation = False
-    diskspace_config = cmk.utils.paths.omd_root + "/etc/diskspace.conf"
+    diskspace_config = cmk.utils.paths.omd_root / "etc/diskspace.conf"
 
     @classmethod
     def ident(cls) -> ConfigDomainName:
@@ -295,7 +294,7 @@ class ConfigDomainDiskspace(ABCConfigDomain):
 
     def default_globals(self):
         diskspace_context: Dict[str, Any] = {}
-        filename = Path(cmk.utils.paths.omd_root, "bin", "diskspace")
+        filename = cmk.utils.paths.omd_root / "bin/diskspace"
         with filename.open(encoding="utf-8") as f:
             code = compile(f.read(), str(filename), "exec")
             exec(code, {}, diskspace_context)
@@ -405,7 +404,7 @@ add_replication_paths(
         ReplicationPath(
             "file",
             "diskspace",
-            os.path.relpath(ConfigDomainDiskspace.diskspace_config, cmk.utils.paths.omd_root),
+            str(ConfigDomainDiskspace.diskspace_config.relative_to(cmk.utils.paths.omd_root)),
             [],
         ),
     ]
@@ -485,10 +484,8 @@ class ConfigDomainApache(ABCConfigDomain):
         }
 
     def _get_value_from_config(self, varname, conv_func, default_value):
-        config_files = [Path(cmk.utils.paths.omd_root).joinpath("etc/apache/apache.conf")]
-        config_files += sorted(
-            Path(cmk.utils.paths.omd_root).joinpath("etc/apache/conf.d").glob("*.conf")
-        )
+        config_files = [cmk.utils.paths.omd_root / "etc/apache/apache.conf"]
+        config_files += sorted((cmk.utils.paths.omd_root / "etc/apache/conf.d").glob("*.conf"))
 
         value = default_value
 
@@ -612,10 +609,8 @@ class ConfigDomainRRDCached(ABCConfigDomain):
         }
 
     def _get_value_from_config(self, varname, conv_func, default_value):
-        config_files = [Path(cmk.utils.paths.omd_root).joinpath("etc/rrdcached.conf")]
-        config_files += sorted(
-            Path(cmk.utils.paths.omd_root).joinpath("etc/rrdcached.d").glob("*.conf")
-        )
+        config_files = [cmk.utils.paths.omd_root / "etc/rrdcached.conf"]
+        config_files += sorted((cmk.utils.paths.omd_root / "etc/rrdcached.d").glob("*.conf"))
 
         value = default_value
 

@@ -74,8 +74,8 @@ def patch_omd_site(monkeypatch):
     store.makedirs(cmk.utils.paths.var_dir + "/wato/php-api")
     store.makedirs(cmk.utils.paths.var_dir + "/wato/auth")
     store.makedirs(cmk.utils.paths.tmp_dir + "/wato/activation")
-    store.makedirs(cmk.utils.paths.omd_root + "/var/log")
-    store.makedirs(cmk.utils.paths.omd_root + "/tmp/check_mk")
+    store.makedirs(cmk.utils.paths.omd_root / "var/log")
+    store.makedirs(cmk.utils.paths.omd_root / "tmp/check_mk")
     store.makedirs(cmk.utils.paths.default_config_dir + "/conf.d/wato")
     store.makedirs(cmk.utils.paths.default_config_dir + "/multisite.d/wato")
     store.makedirs(cmk.utils.paths.default_config_dir + "/mkeventd.d/wato")
@@ -95,9 +95,13 @@ def _touch(path):
 def cleanup_after_test():
     yield
 
+    if cmk.utils.paths.omd_root == Path(""):
+        logger.warning("OMD_ROOT not set, skipping cleanup")
+        return
+
     # Ensure there is no file left over in the unit test fake site
     # to prevent tests involving eachother
-    for entry in Path(cmk.utils.paths.omd_root).iterdir():
+    for entry in cmk.utils.paths.omd_root.iterdir():
         # This randomly fails for some unclear reasons. Looks like a race condition, but I
         # currently have no idea which triggers this since the tests are not executed in
         # parallel at the moment. This is meant as quick hack, trying to reduce flaky results.
@@ -330,7 +334,7 @@ def registry_reset():
             cmk.cee.dcd.plugins.connectors.connectors_api.v1.connector_config_registry
         )
         registries.append(cmk.cee.dcd.plugins.connectors.connectors_api.v1.connector_registry)
-    
+
     defaults_per_registry = [(registry, list(registry)) for registry in registries]  # type: ignore[call-overload]
     try:
         yield

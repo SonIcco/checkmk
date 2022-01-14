@@ -7,14 +7,13 @@
 from abc import ABC, abstractmethod
 from ast import literal_eval
 from dataclasses import asdict, astuple, dataclass
-from typing import Any, Literal, Mapping, Optional, Sequence, Tuple, Type, TypeVar
+from typing import Any, List, Literal, Mapping, Optional, Sequence, Tuple, Type, TypeVar
 
 from cmk.utils.plugin_registry import Registry
 from cmk.utils.python_printer import pformat
 from cmk.utils.type_defs import (
     AgentRawData,
     CheckPluginNameStr,
-    CheckPreviewTable,
     ConfigurationWarnings,
     DiscoveredHostLabelsDict,
 )
@@ -22,10 +21,14 @@ from cmk.utils.type_defs import DiscoveryResult as SingleHostDiscoveryResult
 from cmk.utils.type_defs import (
     Gateways,
     HostName,
+    Item,
     Labels,
     LabelSources,
+    LegacyCheckParameters,
+    MetricTuple,
     NotifyAnalysisInfo,
     NotifyBulks,
+    RulesetName,
     ServiceDetails,
     ServiceState,
 )
@@ -101,10 +104,26 @@ class DiscoveryResult(ABCAutomationResult):
 result_type_registry.register(DiscoveryResult)
 
 
+@dataclass(frozen=True)
+class CheckPreviewEntry:
+    check_source: str
+    check_plugin_name: str
+    ruleset_name: Optional[RulesetName]
+    item: Item
+    discovered_parameters: LegacyCheckParameters
+    effective_parameters: LegacyCheckParameters
+    description: str
+    state: Optional[int]
+    output: str
+    metrics: List[MetricTuple]
+    labels: dict[str, str]
+    found_on_nodes: List[HostName]
+
+
 @dataclass
 class TryDiscoveryResult(ABCAutomationResult):
     output: str
-    check_table: CheckPreviewTable
+    check_table: Sequence[CheckPreviewEntry]
     host_labels: DiscoveredHostLabelsDict
     new_labels: DiscoveredHostLabelsDict
     vanished_labels: DiscoveredHostLabelsDict
@@ -112,6 +131,14 @@ class TryDiscoveryResult(ABCAutomationResult):
 
     def to_pre_21(self) -> Mapping[str, Any]:
         return asdict(self)
+
+    def serialize(self) -> SerializedResult:
+        return SerializedResult(pformat(astuple(self)))
+
+    @classmethod
+    def deserialize(cls, serialized_result: SerializedResult) -> "TryDiscoveryResult":
+        raw_output, raw_check_table, *raw_rest = literal_eval(serialized_result)
+        return cls(raw_output, [CheckPreviewEntry(*cpe) for cpe in raw_check_table], *raw_rest)
 
     @staticmethod
     def automation_call() -> str:

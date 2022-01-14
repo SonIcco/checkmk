@@ -6,11 +6,10 @@
 
 import json
 import os
-import shutil
 import tempfile
 from contextlib import suppress
 from pathlib import Path
-from typing import Mapping
+from uuid import UUID
 
 from agent_receiver.certificates import CertValidationRoute, uuid_from_pem_csr
 from agent_receiver.checkmk_rest_api import (
@@ -20,10 +19,12 @@ from agent_receiver.checkmk_rest_api import (
     link_host_with_uuid,
     post_csr,
 )
-from agent_receiver.constants import AGENT_OUTPUT_DIR, REGISTRATION_REQUESTS
+from agent_receiver.constants import REGISTRATION_REQUESTS
 from agent_receiver.log import logger
 from agent_receiver.models import (
+    HostTypeEnum,
     PairingBody,
+    PairingResponse,
     RegistrationStatus,
     RegistrationWithHNBody,
     RegistrationWithLabelsBody,
@@ -31,19 +32,25 @@ from agent_receiver.models import (
 from agent_receiver.utils import get_registration_status_from_file, Host
 from fastapi import APIRouter, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from starlette.status import HTTP_204_NO_CONTENT, HTTP_404_NOT_FOUND, HTTP_501_NOT_IMPLEMENTED
+from starlette.status import (
+    HTTP_204_NO_CONTENT,
+    HTTP_403_FORBIDDEN,
+    HTTP_404_NOT_FOUND,
+    HTTP_501_NOT_IMPLEMENTED,
+)
+from zstandard import ZstdDecompressor
 
 app = FastAPI()
 cert_validation_router = APIRouter(route_class=CertValidationRoute)
 security = HTTPBasic()
 
 
-@app.post("/pairing")
+@app.post("/pairing", response_model=PairingResponse)
 async def pairing(
     *,
     credentials: HTTPBasicCredentials = Depends(security),
     pairing_body: PairingBody,
-) -> Mapping[str, str]:
+) -> PairingResponse:
     uuid = uuid_from_pem_csr(pairing_body.csr)
 
     if not (rest_api_root_cert_resp := get_root_cert(credentials)).ok:
@@ -81,10 +88,10 @@ async def pairing(
         uuid,
     )
 
-    return {
-        "root_cert": rest_api_root_cert_resp.json()["cert"],
-        "client_cert": rest_api_csr_resp.json()["cert"],
-    }
+    return PairingResponse(
+        root_cert=rest_api_root_cert_resp.json()["cert"],
+        client_cert=rest_api_csr_resp.json()["cert"],
+    )
 
 
 @app.post(
@@ -129,7 +136,7 @@ def _write_registration_file(
     (new_request := dir_new_requests / f"{registration_body.uuid}.json").write_text(
         json.dumps(
             {
-                "uuid": registration_body.uuid,
+                "uuid": str(registration_body.uuid),
                 "username": username,
                 "agent_labels": registration_body.agent_labels,
             }
@@ -167,7 +174,24 @@ async def register_with_labels(
     return Response(status_code=HTTP_204_NO_CONTENT)
 
 
-def _move_ready_file(uuid: str) -> None:
+def _store_agent_data(
+    uploaded_data: UploadFile,
+    target_dir: Path,
+) -> None:
+    temp_file = tempfile.NamedTemporaryFile(
+        dir=target_dir,
+        delete=False,
+    )
+
+    ZstdDecompressor().copy_stream(uploaded_data.file, temp_file)
+
+    try:
+        os.rename(temp_file.name, target_dir / "agent_output")
+    finally:
+        Path(temp_file.name).unlink(missing_ok=True)
+
+
+def _move_ready_file(uuid: UUID) -> None:
     with suppress(FileNotFoundError):
         # TODO: use RegistrationState.READY.name
         (REGISTRATION_REQUESTS / "READY" / f"{uuid}.json").rename(
@@ -180,29 +204,47 @@ def _move_ready_file(uuid: str) -> None:
     status_code=HTTP_204_NO_CONTENT,
 )
 async def agent_data(
-    uuid: str,
+    uuid: UUID,
     *,
     certificate: str = Header(...),
     monitoring_data: UploadFile = File(...),
 ) -> Response:
-    target_dir = AGENT_OUTPUT_DIR / uuid
-    target_path = target_dir / "received-output"
-
-    try:
-        temp_file = tempfile.NamedTemporaryFile(dir=target_dir, delete=False)
-    except FileNotFoundError:
-        # TODO: What are the exact criteria for "registered" and "being a push host"?
+    host = Host(uuid)
+    if not host.registered:
         logger.error(
-            "uuid=%s Host is not registered or is not configured as push host.",
+            "uuid=%s Host is not registered",
             uuid,
         )
-        raise HTTPException(status_code=403, detail="Host is not registered")
+        raise HTTPException(
+            status_code=HTTP_403_FORBIDDEN,
+            detail="Host is not registered",
+        )
+    if host.host_type is not HostTypeEnum.PUSH:
+        logger.error(
+            "uuid=%s Host is not a push host",
+            uuid,
+        )
+        raise HTTPException(
+            status_code=HTTP_403_FORBIDDEN,
+            detail="Host is not a push host",
+        )
 
-    shutil.copyfileobj(monitoring_data.file, temp_file)
     try:
-        os.rename(temp_file.name, target_path)
-    finally:
-        Path(temp_file.name).unlink(missing_ok=True)
+        _store_agent_data(
+            monitoring_data,
+            host.source_path,
+        )
+    except FileNotFoundError:
+        # We only end up here in case someone re-configures the host at exactly the same time when
+        # data is being pushed. To avoid internal server errors, we still handle this case.
+        logger.error(
+            "uuid=%s Host is not registered or not configured as push host.",
+            uuid,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Host is not registered or not configured as push host",
+        )
 
     _move_ready_file(uuid)
 
@@ -215,7 +257,7 @@ async def agent_data(
 
 @cert_validation_router.get("/registration_status/{uuid}", response_model=RegistrationStatus)
 async def registration_status(
-    uuid: str,
+    uuid: UUID,
     certificate: str = Header(...),
 ) -> RegistrationStatus:
     host = Host(uuid)

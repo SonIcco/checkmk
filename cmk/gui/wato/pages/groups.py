@@ -5,7 +5,6 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import abc
-import os
 from typing import Dict, Iterator, List, Optional, Tuple, Type
 
 import cmk.utils.paths
@@ -257,7 +256,7 @@ class ABCModeEditGroup(WatoMode, abc.ABC):
         )
 
     def page(self) -> None:
-        html.begin_form("group")
+        html.begin_form("group", method="POST")
         forms.header(_("Properties"))
         forms.section(_("Name"), simple=not self._new, is_required=True)
         html.help(
@@ -580,8 +579,8 @@ class ModeEditContactgroup(ABCModeEditGroup):
         # for each map. When no maps can be found skip this problem silently.
         # This only works in OMD environments.
         maps = []
-        nagvis_maps_path = cmk.utils.paths.omd_root + "/etc/nagvis/maps"
-        for f in os.listdir(nagvis_maps_path):
-            if f[0] != "." and f.endswith(".cfg"):
-                maps.append((f[:-4], f[:-4]))
+        nagvis_maps_path = cmk.utils.paths.omd_root / "etc/nagvis/maps"
+        for f in nagvis_maps_path.iterdir():
+            if f.name[0] != "." and f.name.endswith(".cfg"):
+                maps.append((f.name[:-4], f.name[:-4]))
         return sorted(maps)

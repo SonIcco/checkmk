@@ -10,7 +10,8 @@ The schemas contained in this file are used to serialize data in the agent outpu
 This file should not contain any code and should not import from anywhere
 except the python standard library or pydantic.
 """
-from typing import Mapping, NewType, Optional, Sequence
+import enum
+from typing import Literal, Mapping, NewType, Optional, Sequence, Union
 
 from pydantic import BaseModel
 
@@ -22,18 +23,55 @@ PodSequence = Sequence[str]
 
 class PerformanceMetric(BaseModel):
     value: float
-    timestamp: int
+    timestamp: float
 
 
 class PerformanceContainer(BaseModel):
     name: ContainerName
 
 
+class ExceptionalResource(str, enum.Enum):
+    """
+    Kubernetes allows omitting the limits and/or requests field for a container. This enum allows us
+    to take this into account, when aggregating containers accross a Kubernetes object.
+    """
+
+    unspecified = "unspecified"
+    """
+    We return this value if there is at least one container, where the limit/request was omitted.
+    """
+    zero = "zero"
+    # Kubernetes allows setting the limit field of a container to zero. According to this issue,
+    # https://github.com/kubernetes/kubernetes/issues/86244
+    # this means the container with limit 0 has unlimited resources. Our understanding is that this
+    # is connected to the behaviour of Docker: Kubernetes passes the Docker runtime the limit value.
+    # Docker then assigns all the memory on the host machine. It therefore means that github issues
+    # might be inaccurate: If there is a container runtime, which uses the limit differently, then
+    # the cluster may behave differently.
+    """
+    Because limit=0 means unlimited rather than zero, we cannot simply add a limit of 0.
+    We return this value if there is at least one container, where the limit field was set to zero.
+    """
+    zero_unspecified = "zero_unspecified"
+    """
+    If both of the above conditions apply to a limit, we use this value.
+    """
+
+
+AggregatedLimit = Union[ExceptionalResource, float]
+AggregatedRequest = Union[Literal[ExceptionalResource.unspecified], float]
+
+
+class Resources(BaseModel):
+    request: AggregatedRequest
+    limit: AggregatedLimit
+
+
 class PodInfo(BaseModel):
     """section: kube_pod_info_v1"""
 
-    namespace: api.Namespace
-    creation_timestamp: api.CreationTimestamp
+    namespace: Optional[api.Namespace]
+    creation_timestamp: Optional[api.CreationTimestamp]
     labels: api.Labels  # used for host labels
     node: Optional[api.NodeName]  # this is optional, because there may be pods, which are not
     # scheduled on any node (e.g., no node with enough capacity is available).
@@ -132,15 +170,10 @@ class ContainerCpuUsage(PerformanceContainer):
 class CpuUsage(BaseModel):
     """section: k8s_live_cpu_usage_v1"""
 
-    containers: Sequence[ContainerCpuUsage]
-
-
-class ContainerMemory(PerformanceContainer):
-    memory_usage_bytes: PerformanceMetric
-    memory_swap: PerformanceMetric
+    usage: float
 
 
 class Memory(BaseModel):
     """section: k8s_live_memory_v1"""
 
-    containers: Sequence[ContainerMemory]
+    memory_usage_bytes: float

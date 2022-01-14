@@ -44,6 +44,7 @@ QosClass = Literal["burstable", "besteffort", "guaranteed"]
 CreationTimestamp = NewType("CreationTimestamp", float)
 Namespace = NewType("Namespace", str)
 NodeName = NewType("NodeName", str)
+IpAddress = NewType("IpAddress", str)
 
 
 class MetaData(BaseModel):
@@ -140,31 +141,35 @@ class Deployment(BaseModel):
     pods: Sequence[PodUID]
 
 
-class Resources(BaseModel):
-    limit: float = float("inf")
-    requests: float = 0.0
-
-
 class Phase(str, enum.Enum):
     RUNNING = "running"
     PENDING = "pending"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
-    UNKNOWN = "unknown "
+    UNKNOWN = "unknown"
 
 
-class PodUsageResources(BaseModel):
-    cpu: Resources
-    memory: Resources
+class ResourcesRequirements(BaseModel):
+    memory: Optional[float] = None
+    cpu: Optional[float] = None
+
+
+class ContainerResources(BaseModel):
+    limits: ResourcesRequirements
+    requests: ResourcesRequirements
+
+
+class ContainerSpec(BaseModel):
+    resources: ContainerResources
+    name: str
 
 
 class PodSpec(BaseModel):
     node: Optional[NodeName] = None
     host_network: Optional[str] = None
     dns_policy: Optional[str] = None
-    host_ip: Optional[str] = None
-    pod_ip: Optional[str] = None
-    qos_class: QosClass
+    restart_policy: RestartPolicy
+    containers: Sequence[ContainerSpec]
 
 
 class ContainerRunningState(BaseModel):
@@ -229,15 +234,17 @@ class PodCondition(BaseModel):
 class PodStatus(BaseModel):
     conditions: List[PodCondition]
     phase: Phase
-    start_time: Optional[int]  # None if pod is faulty
+    start_time: Optional[Timestamp]  # None if pod is faulty
+    host_ip: Optional[IpAddress] = None
+    pod_ip: Optional[IpAddress] = None
+    qos_class: QosClass
 
 
 class Pod(BaseModel):
-    uid: str
+    uid: PodUID
     metadata: MetaData
     status: PodStatus
     spec: PodSpec
-    resources: PodUsageResources
     containers: Mapping[str, ContainerInfo]
 
 

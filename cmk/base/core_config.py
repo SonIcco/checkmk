@@ -10,7 +10,7 @@ import os
 import shutil
 import socket
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import (
     AnyStr,
@@ -228,10 +228,10 @@ def autodetect_plugin(command_line: str) -> str:
     if command_line[0] in ["$", "/"]:
         return command_line
 
-    for directory in ["/local", ""]:
-        path = cmk.utils.paths.omd_root + directory + "/lib/nagios/plugins/"
-        if os.path.exists(path + plugin_name):
-            command_line = str(path + command_line)
+    for directory in ["local", ""]:
+        path = cmk.utils.paths.omd_root / directory / "lib/nagios/plugins"
+        if (path / plugin_name).exists():
+            command_line = f"{path}/{command_line}"
             break
 
     return command_line
@@ -301,11 +301,6 @@ def do_create_config(core: MonitoringCore, hosts_to_update: HostsToUpdate = None
     and available for starting the monitoring.
     """
     out.output("Generating configuration for core (type %s)...\n" % core.name())
-    if hosts_to_update is not None:
-        out.output(
-            "Reuse old configuration, create new configuration for %s and dependant hosts\n"
-            % ", ".join(hosts_to_update)
-        )
 
     try:
         _create_core_config(core, hosts_to_update=hosts_to_update)
@@ -385,13 +380,11 @@ def _create_core_config(
         # Purpose of code is to delete the old config file after format switching to have precisely
         # one microcore config in core config directory.
         if config.is_cmc():
-            try:
+            with suppress(OSError):
                 if config.get_microcore_config_format() == "protobuf":
                     os.remove(cmk.utils.paths.var_dir + "/core/config")
                 else:
                     os.remove(cmk.utils.paths.var_dir + "/core/config.pb")
-            except OSError as _:
-                pass
 
     cmk.utils.password_store.save(config.stored_passwords)
 

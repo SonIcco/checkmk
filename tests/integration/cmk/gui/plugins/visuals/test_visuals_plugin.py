@@ -19,17 +19,16 @@ def plugin_path(site: Site) -> Iterator[str]:
         path,
         """
 from cmk.gui.plugins.visuals.utils import filter_registry
-from cmk.gui.plugins.visuals.filters import FilterText
-import cmk.gui.legacy_filters as legacy_filters
+from cmk.gui.plugins.visuals.filters import InputTextFilter
+import cmk.gui.query_filters as query_filters
 
 filter_registry.register(
-    FilterText(
-        ident="test",
+    InputTextFilter(
         title="test",
         sort_index=102,
         info="host",
-        legacy_filter=legacy_filters.FilterText(
-            column="host_test", htmlvar="test", op="~~", negateable=False
+        query_filter=query_filters.TextQuery(
+            ident="test", op="~~", negateable=False, request_var="test", column="host_test"
         ),
         description="",
         is_show_more=True,
@@ -47,8 +46,8 @@ def fixture_test_script(site: Site) -> Iterator[str]:
     site.write_text_file(
         path,
         """
-import cmk.gui.modules
-cmk.gui.modules.load_plugins()
+from cmk.gui import main_modules
+main_modules.load_plugins()
 from cmk.gui.plugins.visuals.utils import filter_registry
 print("test" in filter_registry)
     """,
@@ -72,17 +71,16 @@ def legacy_plugin_path(site: Site) -> Iterator[str]:
         path,
         """
 from cmk.gui.plugins.visuals import filter_registry
-from cmk.gui.plugins.visuals.filters import FilterText
-import cmk.gui.legacy_filters as legacy_filters
+from cmk.gui.plugins.visuals.filters import InputTextFilter
+import cmk.gui.query_filters as query_filters
 
 filter_registry.register(
-    FilterText(
-        ident="test",
+    InputTextFilter(
         title="test",
         sort_index=102,
         info="host",
-        legacy_filter=legacy_filters.FilterText(
-            column="host_test", htmlvar="test", op="~~", negateable=False
+        query_filter=query_filters.TextQuery(
+            ident="test", op="~~", negateable=False, request_var="test", column="host_test"
         ),
         description="",
         is_show_more=True,

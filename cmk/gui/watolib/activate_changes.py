@@ -231,15 +231,13 @@ def get_replication_paths() -> List[ReplicationPath]:
         ReplicationPath(
             "dir",
             "local",
-            os.path.relpath(cmk.utils.paths.omd_root + "/local", cmk.utils.paths.omd_root),
+            "local",
             [],
         ),
         ReplicationPath(
             "file",
             "omd",
-            os.path.relpath(
-                cmk.utils.paths.omd_root + "/etc/omd/sitespecific.mk", cmk.utils.paths.omd_root
-            ),
+            "etc/omd/sitespecific.mk",
             [],
         ),
     ]
@@ -1100,7 +1098,7 @@ class CRESnapshotDataCollector(ABCSnapshotDataCollector):
             if component.ident == "sitespecific":
                 continue  # Will be created for each site individually later
 
-            source_path = Path(cmk.utils.paths.omd_root).joinpath(component.site_path)
+            source_path = cmk.utils.paths.omd_root / component.site_path
             target_path = Path(snapshot_settings.work_dir).joinpath(component.site_path)
 
             store.makedirs(target_path.parent)
@@ -1895,7 +1893,7 @@ class ActivateChangesSite(multiprocessing.Process, ActivateChanges):
         self._status_text = status_text
 
         if phase != PHASE_INITIALIZED:
-            self._set_status_details(phase, status_details)
+            self._status_details = self._calc_status_details(phase, status_details)
 
         self._time_updated = time.time()
         if phase == PHASE_DONE:
@@ -1919,31 +1917,31 @@ class ActivateChangesSite(multiprocessing.Process, ActivateChanges):
             },
         )
 
-    def _set_status_details(self, phase: Phase, status_details: Optional[str]) -> None:
+    def _calc_status_details(self, phase: Phase, status_details: Optional[str]) -> str:
         # As long as the site is in queue, there is no time started
         if phase == PHASE_QUEUED:
-            self._status_details = _("Queued for update")
+            value = _("Queued for update")
         elif self._time_started is not None:
-            self._status_details = _("Started at: %s.") % render.time_of_day(self._time_started)
+            value = _("Started at: %s.") % render.time_of_day(self._time_started)
         else:
-            self._status_details = _("Not started.")
+            value = _("Not started.")
 
         if phase == PHASE_DONE:
-            self._status_details += _(" Finished at: %s.") % render.time_of_day(self._time_ended)
+            value += _(" Finished at: %s.") % render.time_of_day(self._time_ended)
         elif phase != PHASE_QUEUED:
             assert isinstance(self._time_started, (int, float))
             estimated_time_left = self._expected_duration - (time.time() - self._time_started)
             if estimated_time_left < 0:
-                self._status_details += " " + _("Takes %.1f seconds longer than expected") % abs(
+                value += " " + _("Takes %.1f seconds longer than expected") % abs(
                     estimated_time_left
                 )
             else:
-                self._status_details += (
-                    " " + _("Approximately finishes in %.1f seconds") % estimated_time_left
-                )
+                value += " " + _("Approximately finishes in %.1f seconds") % estimated_time_left
 
         if status_details:
-            self._status_details += "<br>%s" % status_details
+            value += "<br>%s" % status_details
+
+        return value
 
     def _save_state(
         self, activation_id: ActivationId, site_id: SiteId, state: SiteActivationState
@@ -2042,7 +2040,7 @@ def apply_pre_17_sync_snapshot(
         _save_pre_17_site_globals_on_slave_site(tar_content)
 
         # Create rule making this site only monitor our hosts
-        create_distributed_wato_files(Path(cmk.utils.paths.omd_root), site_id, is_remote=True)
+        create_distributed_wato_files(cmk.utils.paths.omd_root, site_id, is_remote=True)
 
         _execute_post_config_sync_actions(site_id)
         _execute_cmk_update_config()
@@ -2420,9 +2418,7 @@ class AutomationGetConfigSyncState(AutomationCommand):
 
     def execute(self, api_request: List[ReplicationPath]) -> GetConfigSyncStateResponse:
         with store.lock_checkmk_configuration():
-            file_infos = _get_config_sync_file_infos(
-                api_request, base_dir=Path(cmk.utils.paths.omd_root)
-            )
+            file_infos = _get_config_sync_file_infos(api_request, base_dir=cmk.utils.paths.omd_root)
             transport_file_infos = {
                 k: (v.st_mode, v.st_size, v.link_target, v.file_hash) for k, v in file_infos.items()
             }
@@ -2559,7 +2555,7 @@ class AutomationReceiveConfigSync(AutomationCommand):
 
     def _update_config_on_remote_site(self, sync_archive: bytes, to_delete: List[str]) -> None:
         """Use the given tar archive and list of files to be deleted to update the local files"""
-        base_dir = Path(cmk.utils.paths.omd_root)
+        base_dir = cmk.utils.paths.omd_root
 
         for site_path in to_delete:
             site_file = base_dir.joinpath(site_path)

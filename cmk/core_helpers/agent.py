@@ -126,10 +126,8 @@ class AgentFetcher(Fetcher[AgentRawData]):
     pass
 
 
-AgentHostSections = HostSections[AgentRawDataSection]
-
 MutableSection = MutableMapping[SectionMarker, List[AgentRawData]]
-ImmutableSection = Mapping[SectionMarker, List[AgentRawData]]
+ImmutableSection = Mapping[SectionMarker, Sequence[AgentRawData]]
 
 
 class ParserState(abc.ABC):
@@ -486,7 +484,7 @@ class HostSectionParser(ParserState):
         return self
 
 
-class AgentParser(Parser[AgentRawData, AgentHostSections]):
+class AgentParser(Parser[AgentRawData, AgentRawDataSection]):
     """A parser for agent data."""
 
     def __init__(
@@ -517,7 +515,7 @@ class AgentParser(Parser[AgentRawData, AgentHostSections]):
         raw_data: AgentRawData,
         *,
         selection: SectionNameCollection,
-    ) -> AgentHostSections:
+    ) -> HostSections[AgentRawDataSection]:
         if self.simulation:
             raw_data = agent_simulator.process(raw_data)
 
@@ -532,8 +530,8 @@ class AgentParser(Parser[AgentRawData, AgentHostSections]):
 
         def decode_sections(
             sections: ImmutableSection,
-        ) -> MutableMapping[SectionName, AgentRawDataSection]:
-            out: MutableMapping[SectionName, AgentRawDataSection] = {}
+        ) -> MutableMapping[SectionName, List[AgentRawDataSection]]:
+            out: MutableMapping[SectionName, List[AgentRawDataSection]] = {}
             for header, content in sections.items():
                 out.setdefault(header.name, []).extend(header.parse_line(line) for line in content)
             return out
@@ -593,15 +591,15 @@ class AgentParser(Parser[AgentRawData, AgentHostSections]):
                 return now, until
             return None
 
-        self.section_store.update_and_mutate(
+        new_sections = self.section_store.update(
             sections,
             cache_info,
             lookup_persist,
             now=now,
             keep_outdated=self.keep_outdated,
         )
-        return AgentHostSections(
-            sections,
+        return HostSections[AgentRawDataSection](
+            new_sections,
             cache_info=cache_info,
             piggybacked_raw_data=piggybacked_raw_data,
         )
@@ -625,7 +623,7 @@ class AgentParser(Parser[AgentRawData, AgentHostSections]):
         return parser.sections, parser.piggyback_sections
 
 
-class AgentSummarizer(Summarizer[AgentHostSections]):
+class AgentSummarizer(Summarizer[AgentRawDataSection]):
     pass
 
 
@@ -648,7 +646,7 @@ class AgentSummarizerDefault(AgentSummarizer):
 
     def summarize_success(
         self,
-        host_sections: AgentHostSections,
+        host_sections: HostSections[AgentRawDataSection],
         *,
         mode: Mode,
     ) -> Sequence[ActiveCheckResult]:
@@ -659,7 +657,7 @@ class AgentSummarizerDefault(AgentSummarizer):
 
     def summarize_check_mk_section(
         self,
-        cmk_section: Optional[AgentRawDataSection],
+        cmk_section: Optional[Sequence[AgentRawDataSection]],
         *,
         mode: Mode,
     ) -> Sequence[ActiveCheckResult]:
@@ -696,7 +694,7 @@ class AgentSummarizerDefault(AgentSummarizer):
 
     @staticmethod
     def _get_agent_info(
-        string_table: Optional[AgentRawDataSection],
+        string_table: Optional[Sequence[AgentRawDataSection]],
     ) -> Dict[str, Optional[str]]:
         section: Dict[str, Optional[str]] = {}
 

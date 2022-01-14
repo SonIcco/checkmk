@@ -18,11 +18,11 @@ import os
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import (
     Callable,
     DefaultDict,
     Dict,
-    Iterable,
     Iterator,
     List,
     Mapping,
@@ -31,7 +31,7 @@ from typing import (
     Optional,
     Protocol,
     Sequence,
-    Type,
+    Union,
 )
 
 import requests
@@ -40,26 +40,62 @@ from kubernetes import client  # type: ignore[import] # pylint: disable=import-e
 from pydantic import BaseModel
 
 import cmk.utils.password_store
+import cmk.utils.paths
 import cmk.utils.profile
 
 from cmk.special_agents.utils.agent_common import ConditionalPiggybackSection, SectionWriter
 from cmk.special_agents.utils_kubernetes.api_server import APIServer
 from cmk.special_agents.utils_kubernetes.schemata import api, section
 
+AGENT_TMP_PATH = Path(cmk.utils.paths.tmp_dir, "agent_kube")
+
 MetricName = NewType("MetricName", str)
-PodUID = NewType("PodUID", str)
+ContainerName = NewType("ContainerName", str)
 SectionName = NewType("SectionName", str)
 
 
+class PerformanceMetric(BaseModel):
+    container_name: ContainerName
+    name: MetricName
+    value: float
+    timestamp: float
+
+
+class RateMetric(BaseModel):
+    name: str
+    rate: float
+
+
+class PerformanceContainer(BaseModel):
+    name: ContainerName
+    pod_uid: api.PodUID
+    metrics: Mapping[MetricName, PerformanceMetric]
+    rate_metrics: Optional[Mapping[MetricName, RateMetric]]
+
+
 class PerformancePod(NamedTuple):
-    uid: PodUID
+    uid: api.PodUID
     containers: List[PerformanceContainer]
 
 
-class PerformanceContainer(NamedTuple):
-    name: section.ContainerName
-    metrics: Mapping[MetricName, section.PerformanceMetric]
-    pod_uid: PodUID
+class CounterMetric(BaseModel):
+    name: MetricName
+    value: float
+    timestamp: float
+
+
+class ContainerMetricsStore(BaseModel):
+    name: ContainerName
+    metrics: Mapping[MetricName, CounterMetric]
+
+
+class ContainersStore(BaseModel):
+    containers: Mapping[ContainerName, ContainerMetricsStore]
+
+
+class ContainerMetadata(BaseModel):
+    name: ContainerName
+    pod_uid: api.PodUID
 
 
 class PathPrefixAction(argparse.Action):
@@ -117,23 +153,25 @@ def setup_logging(verbosity: int) -> None:
 class Pod:
     def __init__(
         self,
-        uid: str,
+        uid: api.PodUID,
         metadata: api.MetaData,
         status: api.PodStatus,
         spec: api.PodSpec,
-        resources: api.PodUsageResources,
         containers: Mapping[str, api.ContainerInfo],
     ) -> None:
-        self.uid = PodUID(uid)
+        self.uid = uid
         self.metadata = metadata
-        self.node = spec.node
+        self.spec = spec
         self.status = status
-        self.resources = resources
         self.containers = containers
 
     @property
     def phase(self):
         return self.status.phase
+
+    @property
+    def node(self) -> Optional[api.NodeName]:
+        return self.spec.node
 
     def lifecycle_phase(self) -> section.PodLifeCycle:
         return section.PodLifeCycle(phase=self.phase)
@@ -144,18 +182,41 @@ class Pod:
 
         return f"{self.metadata.namespace}_{self.metadata.name}"
 
-    def cpu_resources(self) -> api.Resources:
-        return api.Resources(
-            limit=self.resources.cpu.limit,
-            requests=self.resources.cpu.requests,
+    def info(self) -> section.PodInfo:
+        return section.PodInfo(
+            namespace=self.metadata.namespace,
+            creation_timestamp=self.metadata.creation_timestamp,
+            labels=self.metadata.labels if self.metadata.labels else {},
+            node=self.node,
+            restart_policy=self.spec.restart_policy,
+            qos_class=self.status.qos_class,
+            uid=self.uid,
         )
 
-    def memory_resources(self) -> api.Resources:
-        return api.Resources(
-            limit=self.resources.memory.limit, requests=self.resources.memory.requests
+    def cpu_limit(self) -> section.AggregatedLimit:
+        return aggregate_limit_values(
+            [container.resources.limits.cpu for container in self.spec.containers]
         )
 
-    def conditions(self) -> section.PodConditions:
+    def cpu_request(self) -> section.AggregatedRequest:
+        return aggregate_request_values(
+            [container.resources.requests.cpu for container in self.spec.containers]
+        )
+
+    def memory_limit(self) -> section.AggregatedLimit:
+        return aggregate_limit_values(
+            [container.resources.limits.memory for container in self.spec.containers]
+        )
+
+    def memory_request(self) -> section.AggregatedRequest:
+        return aggregate_request_values(
+            [container.resources.requests.memory for container in self.spec.containers]
+        )
+
+    def conditions(self) -> Optional[section.PodConditions]:
+        if not self.status.conditions:
+            return None
+
         # TODO: separate section for custom conditions
         return section.PodConditions(
             **{
@@ -179,6 +240,26 @@ class Pod:
         if self.status.start_time is None:
             return None
         return api.StartTime(start_time=self.status.start_time)
+
+
+def aggregate_request_values(
+    request_values: Sequence[Optional[float]],
+) -> section.AggregatedRequest:
+    if None in request_values:
+        return section.ExceptionalResource.unspecified
+    return sum(request_values)  # type: ignore
+
+
+def aggregate_limit_values(limit_values: Sequence[Optional[float]]) -> section.AggregatedLimit:
+    contains_unspecified = None in limit_values
+    contains_zero = 0 in limit_values
+    if contains_unspecified and contains_zero:
+        return section.ExceptionalResource.zero_unspecified
+    if contains_zero:
+        return section.ExceptionalResource.zero
+    if contains_unspecified:
+        return section.ExceptionalResource.unspecified
+    return sum(limit_values)  # type: ignore
 
 
 class Deployment:
@@ -231,8 +312,11 @@ class Deployment:
     def conditions(self) -> section.DeploymentConditions:
         return section.DeploymentConditions(conditions=self.status.conditions)
 
-    def memory_resources(self) -> api.Resources:
+    def memory_resources(self) -> section.Resources:
         return _collect_memory_resources(self._pods)
+
+    def cpu_resources(self) -> section.Resources:
+        return _collect_cpu_resources(self._pods)
 
 
 class Node:
@@ -293,8 +377,11 @@ class Node:
 
         return result
 
-    def memory_resources(self) -> api.Resources:
+    def memory_resources(self) -> section.Resources:
         return _collect_memory_resources(self._pods)
+
+    def cpu_resources(self) -> section.Resources:
+        return _collect_cpu_resources(self._pods)
 
 
 class Cluster:
@@ -320,7 +407,6 @@ class Cluster:
                     pod.metadata,
                     pod.status,
                     pod.spec,
-                    pod.resources,
                     pod.containers,
                 )
             )
@@ -393,16 +479,52 @@ class Cluster:
             raise AttributeError("cluster_details was not provided")
         return self._cluster_details
 
-    def memory_resources(self) -> api.Resources:
+    def memory_resources(self) -> section.Resources:
         return _collect_memory_resources(list(self._pods.values()))
 
+    def cpu_resources(self) -> section.Resources:
+        return _collect_cpu_resources(list(self._pods.values()))
 
-def _collect_memory_resources(pods: Sequence[Pod]) -> api.Resources:
-    resources: DefaultDict[str, float] = defaultdict(float)
-    for pod in pods:
-        for k, v in dict(pod.memory_resources()).items():
-            resources[k] += v
-    return api.Resources(**resources)
+
+# TODO aggregating this by combining the values from pods duplicates some of logic (compare this
+# function to aggregate_limit_values). In the future, Kubernetes objects such as cluster should
+# use aggregate_limit_values.
+def aggregate_limit_values_from_pods(
+    limit_values: Sequence[section.AggregatedLimit],
+) -> section.AggregatedLimit:
+    if section.ExceptionalResource.zero_unspecified in limit_values:
+        return section.ExceptionalResource.zero_unspecified
+    contains_unspecified = section.ExceptionalResource.unspecified in limit_values
+    contains_zero = section.ExceptionalResource.zero in limit_values
+    if contains_zero and contains_unspecified:
+        return section.ExceptionalResource.zero_unspecified
+    if contains_unspecified:
+        return section.ExceptionalResource.unspecified
+    if contains_zero:
+        return section.ExceptionalResource.zero
+    return sum(limit_values)
+
+
+def aggregate_request_values_from_pods(
+    request_values: Sequence[section.AggregatedRequest],
+) -> section.AggregatedRequest:
+    if section.ExceptionalResource.unspecified in request_values:
+        return section.ExceptionalResource.unspecified
+    return sum(request_values)
+
+
+def _collect_memory_resources(pods: Sequence[Pod]) -> section.Resources:
+    return section.Resources(
+        limit=aggregate_limit_values_from_pods([pod.memory_limit() for pod in pods]),
+        request=aggregate_request_values_from_pods([pod.memory_request() for pod in pods]),
+    )
+
+
+def _collect_cpu_resources(pods: Sequence[Pod]) -> section.Resources:
+    return section.Resources(
+        limit=aggregate_limit_values_from_pods([pod.cpu_limit() for pod in pods]),
+        request=aggregate_request_values_from_pods([pod.cpu_request() for pod in pods]),
+    )
 
 
 class JsonProtocol(Protocol):
@@ -419,23 +541,26 @@ def _write_sections(sections: Mapping[str, Callable[[], Optional[JsonProtocol]]]
             writer.append(section_output.json())
 
 
-def output_cluster_api_sections(cluster: Cluster) -> None:
+def write_cluster_api_sections(cluster: Cluster) -> None:
     sections = {
         "kube_pod_resources_with_capacity_v1": cluster.pod_resources,
         "kube_node_count_v1": cluster.node_count,
         "kube_cluster_details_v1": cluster.cluster_details,
         "kube_memory_resources_v1": cluster.memory_resources,
+        "kube_cpu_resources_v1": cluster.cpu_resources,
     }
     _write_sections(sections)
 
 
-def output_nodes_api_sections(api_nodes: Sequence[Node]) -> None:
+def write_nodes_api_sections(api_nodes: Sequence[Node]) -> None:
     def output_sections(cluster_node: Node) -> None:
         sections = {
             "kube_node_container_count_v1": cluster_node.container_count,
             "kube_node_kubelet_v1": cluster_node.kubelet,
             "kube_pod_resources_with_capacity_v1": cluster_node.pod_resources,
             "kube_node_info_v1": cluster_node.info,
+            "kube_cpu_resources_v1": cluster_node.cpu_resources,
+            "kube_memory_resources_v1": cluster_node.memory_resources,
         }
         _write_sections(sections)
 
@@ -444,7 +569,7 @@ def output_nodes_api_sections(api_nodes: Sequence[Node]) -> None:
             output_sections(node)
 
 
-def output_deployments_api_sections(api_deployments: Sequence[Deployment]) -> None:
+def write_deployments_api_sections(api_deployments: Sequence[Deployment]) -> None:
     """Write the deployment relevant sections based on k8 API information"""
 
     def output_sections(cluster_deployment: Deployment) -> None:
@@ -453,6 +578,7 @@ def output_deployments_api_sections(api_deployments: Sequence[Deployment]) -> No
             "kube_memory_resources_v1": cluster_deployment.memory_resources,
             "kube_deployment_info_v1": cluster_deployment.info,
             "kube_deployment_conditions_v1": cluster_deployment.conditions,
+            "kube_cpu_resources_v1": cluster_deployment.cpu_resources,
         }
         _write_sections(sections)
 
@@ -461,138 +587,127 @@ def output_deployments_api_sections(api_deployments: Sequence[Deployment]) -> No
             output_sections(deployment)
 
 
-def output_pods_api_sections(api_pods: Sequence[Pod]) -> None:
-    def output_sections(cluster_pod: Pod) -> None:
-        sections = {
-            "kube_cpu_resources_v1": cluster_pod.cpu_resources,
-            "k8s_pod_conditions_v1": cluster_pod.conditions,
-            "kube_pod_containers_v1": cluster_pod.containers_infos,
-            "kube_start_time_v1": cluster_pod.start_time,
-            "kube_memory_resources_v1": cluster_pod.memory_resources,
-            "kube_pod_lifecycle_v1": cluster_pod.lifecycle_phase,
-        }
-        _write_sections(sections)
-
+def write_pods_api_sections(api_pods: Sequence[Pod]) -> None:
     for pod in api_pods:
         with ConditionalPiggybackSection(f"pod_{pod.name(prepend_namespace=True)}"):
-            output_sections(pod)
+            for section_name, section_content in pod_api_based_checkmk_sections(pod):
+                if section_content is None:
+                    continue
+                with SectionWriter(section_name) as writer:
+                    writer.append(section_content.json())
+
+
+def pod_api_based_checkmk_sections(pod: Pod):
+    sections = (
+        ("k8s_pod_conditions_v1", pod.conditions),
+        ("kube_pod_containers_v1", pod.containers_infos),
+        ("kube_start_time_v1", pod.start_time),
+        ("kube_pod_lifecycle_v1", pod.lifecycle_phase),
+        ("kube_pod_info_v1", pod.info),
+        (
+            "kube_cpu_resources_v1",
+            lambda: section.Resources(limit=pod.cpu_limit(), request=pod.cpu_request()),
+        ),
+        (
+            "kube_memory_resources_v1",
+            lambda: section.Resources(limit=pod.memory_limit(), request=pod.memory_request()),
+        ),
+    )
+    for section_name, section_call in sections:
+        yield section_name, section_call()
 
 
 def filter_outdated_pods(
-    live_pods: Sequence[PerformancePod], uid_piggyback_mappings: Mapping[PodUID, str]
+    live_pods: Sequence[PerformancePod], uid_piggyback_mappings: Mapping[api.PodUID, str]
 ) -> Iterator[PerformancePod]:
     return (live_pod for live_pod in live_pods if live_pod.uid in uid_piggyback_mappings)
 
 
-def cluster_performance_sections(pods: List[PerformancePod]) -> None:
-    sections = [
-        (SectionName("memory"), section.Memory, ("memory_usage_bytes", "memory_swap")),
-    ]
-    for section_name, section_model, metrics in sections:
-        section_containers = _performance_section_containers(
-            container_model=_extract_container_model(section_model),
-            containers=[container for pod in pods for container in pod.containers],
-            metrics=metrics,
-        )
-        write_performance_section(
-            section_name,
-            section_model,
-            section_containers,
-        )
+def write_kube_object_performance_section(
+    kube_obj: Union[Cluster, Node, Deployment],
+    performance_pods: Mapping[api.PodUID, PerformancePod],
+    piggyback_name: Optional[str] = None,
+):
+    """Write cluster, node & deployment sections based on collected performance metrics"""
 
-
-def node_performance_sections(pods: List[PerformancePod]) -> None:
-    """Write node sections based on collected performance metrics"""
-    sections = [
-        (SectionName("memory"), section.Memory, ("memory_usage_bytes", "memory_swap")),
-    ]
-    for section_name, section_model, metrics in sections:
-        section_containers = _performance_section_containers(
-            container_model=_extract_container_model(section_model),
-            containers=[container for pod in pods for container in pod.containers],
-            metrics=metrics,
+    def write_object_sections(containers):
+        # Memory section
+        _write_performance_section(
+            section_name=SectionName("memory"),
+            section_output=section.Memory(
+                memory_usage_bytes=_aggregate_metric(containers, MetricName("memory_usage_bytes")),
+            ),
         )
-        write_performance_section(
-            section_name,
-            section_model,
-            section_containers,
+        # CPU section
+        _write_performance_section(
+            section_name=SectionName("cpu_usage"),
+            section_output=section.CpuUsage(
+                usage=_aggregate_rate_metric(containers, MetricName("cpu_usage_seconds_total")),
+            ),
         )
 
+    if not (pods := kube_obj.pods(phase=api.Phase.RUNNING)):
+        return
 
-def deployment_performance_sections(pods: List[PerformancePod]) -> None:
-    """Write deployment sections based on collected performance metrics"""
-    sections = [
-        (SectionName("memory"), section.Memory, ("memory_usage_bytes", "memory_swap")),
-    ]
-    for section_name, section_model, metrics in sections:
-        section_containers = _performance_section_containers(
-            container_model=_extract_container_model(section_model),
-            containers=[container for pod in pods for container in pod.containers],
-            metrics=metrics,
-        )
-        write_performance_section(
-            section_name,
-            section_model,
-            section_containers,
-        )
+    selected_pods = [performance_pods[pod.uid] for pod in pods if pod.uid in performance_pods]
+    if not selected_pods:
+        return
+
+    containers = [container for pod in selected_pods for container in pod.containers]
+
+    if piggyback_name is not None:
+        with ConditionalPiggybackSection(piggyback_name):
+            write_object_sections(containers)
+    else:
+        write_object_sections(containers)
 
 
-def pod_performance_sections(containers: Sequence[PerformanceContainer]) -> None:
+def pod_performance_sections(pod: PerformancePod) -> None:
     """Write pod sections based on collected performance metrics"""
-    sections = [
-        (SectionName("cpu_usage_total"), section.CpuUsage, ("cpu_usage_seconds_total",)),
-        (SectionName("memory"), section.Memory, ("memory_usage_bytes", "memory_swap")),
-    ]
-    for section_name, section_model, metrics in sections:
-        section_containers = _performance_section_containers(
-            container_model=_extract_container_model(section_model),
-            containers=containers,
-            metrics=metrics,
-        )
-        write_performance_section(section_name, section_model, section_containers)
+    if not pod.containers:
+        return
+
+    # CPU section
+    _write_performance_section(
+        section_name=SectionName("cpu_usage"),
+        section_output=section.CpuUsage(
+            usage=_aggregate_rate_metric(pod.containers, MetricName("cpu_usage_seconds_total")),
+        ),
+    )
+
+    # Memory section
+    _write_performance_section(
+        section_name=SectionName("memory"),
+        section_output=section.Memory(
+            memory_usage_bytes=_aggregate_metric(pod.containers, MetricName("memory_usage_bytes")),
+        ),
+    )
 
 
-def write_performance_section(
-    section_name: SectionName,
-    section_model: Type[BaseModel],
-    section_containers: Sequence[BaseModel],
-) -> None:
+def _aggregate_metric(containers: Sequence[PerformanceContainer], metric: MetricName) -> float:
+    """Aggregate a metric across all containers"""
+    return 0.0 + sum(
+        [container.metrics[metric].value for container in containers if metric in container.metrics]
+    )
+
+
+def _aggregate_rate_metric(
+    containers: Sequence[PerformanceContainer], rate_metric: MetricName
+) -> float:
+    """Aggregate a rate metric across all containers"""
+    return 0.0 + sum(
+        [
+            container.rate_metrics[rate_metric].rate
+            for container in containers
+            if container.rate_metrics is not None and rate_metric in container.rate_metrics
+        ]
+    )
+
+
+def _write_performance_section(section_name: SectionName, section_output: BaseModel):
+    # TODO: change live to performance (including checks)
     with SectionWriter(f"k8s_live_{section_name}_v1") as writer:
-        writer.append(section_model(containers=section_containers).json())
-
-
-def _performance_section_containers(
-    container_model: Type[BaseModel],
-    containers: Sequence[PerformanceContainer],
-    metrics: Iterable[str],
-) -> Sequence[BaseModel]:
-    section_containers = []
-    for container in containers:
-        section_containers.append(
-            container_model(
-                name=section.ContainerName(container.name),
-                **{
-                    metric: container.metrics[MetricName(metric)]
-                    for metric in metrics
-                    if metric in container.metrics
-                },
-            )
-        )
-    return section_containers
-
-
-def _extract_container_model(section_model: Type[BaseModel]) -> Type[BaseModel]:
-    """Retrieve the pydantic BaseModel type of the containers' included in the overall section model
-
-    Examples:
-       >>> _extract_container_model(section.Memory)
-       <class 'cmk.special_agents.utils_kubernetes.schemata.section.ContainerMemory'>
-    """
-
-    section_fields = section_model.__fields__
-    if "containers" not in section_fields:
-        raise DefinitionError("Performance return section should be a sequence of containers")
-    return section_fields["containers"].type_
+        writer.append(section_output.json())
 
 
 class DefinitionError(Exception):
@@ -603,7 +718,7 @@ class SetupError(Exception):
     pass
 
 
-def collect_metrics_from_cluster_agent(
+def request_metrics_from_cluster_collector(
     cluster_agent_url: str, verify: bool
 ) -> Sequence[Mapping[str, str]]:
     cluster_resp = requests.get(
@@ -619,49 +734,7 @@ def collect_metrics_from_cluster_agent(
     return json.loads(resp_content[0])
 
 
-def group_metrics_by_containers(
-    performance_metrics: Sequence[Mapping[str, str]]
-) -> Sequence[PerformanceContainer]:
-    containers: Dict[section.ContainerName, Dict[MetricName, section.PerformanceMetric]] = {}
-    container_pod_uid_mappings: Dict[section.ContainerName, PodUID] = {}
-    for performance_metric in performance_metrics:
-        if (name := performance_metric["container_name"]) not in container_pod_uid_mappings:
-            container_pod_uid_mappings[section.ContainerName(name)] = PodUID(
-                performance_metric["pod_uid"]
-            )
-
-        container_metrics = containers.setdefault(section.ContainerName(name), {})
-        try:
-            metric_value, timestamp = performance_metric["metric_value_string"].split(" ")
-            metric_timestamp = int(timestamp)
-        except ValueError:
-            metric_value = performance_metric["metric_value_string"]
-            metric_timestamp = int(time.time())
-        metric_name = performance_metric["metric_name"].replace("container_", "", 1)
-        container_metrics[MetricName(metric_name)] = section.PerformanceMetric(
-            value=float(metric_value), timestamp=metric_timestamp
-        )
-
-    return [
-        PerformanceContainer(name=name, metrics=metrics, pod_uid=container_pod_uid_mappings[name])
-        for name, metrics in containers.items()
-    ]
-
-
-def group_containers_by_pods(
-    performance_containers: Sequence[PerformanceContainer],
-) -> Mapping[PodUID, PerformancePod]:
-    parsed_pods: Dict[PodUID, List[PerformanceContainer]] = {}
-    for container in performance_containers:
-        pod_containers = parsed_pods.setdefault(container.pod_uid, [])
-        pod_containers.append(container)
-    return {
-        pod_uid: PerformancePod(uid=pod_uid, containers=containers)
-        for pod_uid, containers in parsed_pods.items()
-    }
-
-
-def map_uid_to_piggyback_host_name(api_pods: Sequence[Pod]) -> Mapping[PodUID, str]:
+def map_uid_to_piggyback_host_name(api_pods: Sequence[Pod]) -> Mapping[api.PodUID, str]:
     return {pod.uid: pod.name(prepend_namespace=True) for pod in api_pods}
 
 
@@ -675,11 +748,158 @@ def make_api_client(arguments: argparse.Namespace) -> client.ApiClient:
         config.api_key["authorization"] = arguments.token
 
     if arguments.verify_cert:
-        config.verify_ssl = False
-    else:
         config.ssl_ca_cert = os.environ.get("REQUESTS_CA_BUNDLE")
+    else:
+        logging.info("Disabling SSL certificate verification")
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        config.verify_ssl = False
 
     return client.ApiClient(config)
+
+
+def parse_performance_metrics(
+    cluster_collector_metrics: Sequence[Mapping[str, str]]
+) -> Sequence[PerformanceMetric]:
+    metrics = []
+    for metric in cluster_collector_metrics:
+        if " " in (metric_value := metric["metric_value_string"]):
+            metric_value, timestamp = metric_value.split(" ")
+            metric_timestamp = float(timestamp) / 1000.0
+        else:
+            metric_timestamp = time.time()
+
+        metric_name = metric["metric_name"].replace("container_", "", 1)
+        metrics.append(
+            PerformanceMetric(
+                container_name=section.ContainerName(metric["container_name"]),
+                name=MetricName(metric_name),
+                value=metric_value,
+                timestamp=metric_timestamp,
+            )
+        )
+    return metrics
+
+
+def filter_specific_metrics(
+    metrics: Sequence[PerformanceMetric], metric_names: Sequence[MetricName]
+) -> Iterator[PerformanceMetric]:
+    for metric in metrics:
+        if metric.name in metric_names:
+            yield metric
+
+
+def determine_rate_metrics(
+    containers_counters: Mapping[ContainerName, ContainerMetricsStore],
+    containers_counters_old: Mapping[ContainerName, ContainerMetricsStore],
+) -> Mapping[ContainerName, Mapping[MetricName, RateMetric]]:
+    """Determine the rate metrics for each container based on the current and previous
+    counter metric values"""
+
+    containers = {}
+    for container in containers_counters.values():
+        if (old_container := containers_counters_old.get(container.name)) is None:
+            continue
+
+        container_rate_metrics = container_available_rate_metrics(
+            container.metrics, old_container.metrics
+        )
+        containers[container.name] = container_rate_metrics
+    return containers
+
+
+def container_available_rate_metrics(
+    counter_metrics, old_counter_metrics
+) -> Mapping[MetricName, RateMetric]:
+    rate_metrics = {}
+    for counter_metric in counter_metrics.values():
+        if counter_metric.name not in old_counter_metrics:
+            continue
+
+        rate_metrics[counter_metric.name] = RateMetric(
+            name=counter_metric.name,
+            rate=calculate_rate(counter_metric, old_counter_metrics[counter_metric.name]),
+        )
+    return rate_metrics
+
+
+def calculate_rate(counter_metric: CounterMetric, old_counter_metric: CounterMetric) -> float:
+    time_delta = counter_metric.timestamp - old_counter_metric.timestamp
+    return (counter_metric.value - old_counter_metric.value) / time_delta
+
+
+def load_containers_store(path: Path, file_name: str) -> ContainersStore:
+    try:
+        with open(f"{path}/{file_name}", "r") as f:
+            return ContainersStore(**json.loads(f.read()))
+    except FileNotFoundError:
+        logging.debug("Could not find metrics file. This is expected if the first run.")
+    except SyntaxError:
+        logging.debug("Found metrics file, but could not parse it.")
+    return ContainersStore(containers={})
+
+
+def persist_containers_store(containers_store: ContainersStore, path: Path, file_name: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    with open(f"{path}/{file_name}", "w") as f:
+        f.write(containers_store.json())
+
+
+def group_metrics_by_container(
+    performance_metrics: Union[Iterator[PerformanceMetric], Sequence[PerformanceMetric]],
+    omit_metrics: Optional[Sequence[MetricName]] = None,
+) -> Mapping[ContainerName, Mapping[MetricName, PerformanceMetric]]:
+    if omit_metrics is None:
+        omit_metrics = []
+
+    containers: DefaultDict[ContainerName, Dict[MetricName, PerformanceMetric]] = defaultdict(dict)
+    for performance_metric in performance_metrics:
+        if performance_metric.name in omit_metrics:
+            continue
+        containers[performance_metric.container_name][performance_metric.name] = performance_metric
+    return containers
+
+
+def group_containers_by_pods(
+    performance_containers: Iterator[PerformanceContainer],
+) -> Mapping[api.PodUID, PerformancePod]:
+    parsed_pods: Dict[api.PodUID, List[PerformanceContainer]] = {}
+    for container in performance_containers:
+        pod_containers = parsed_pods.setdefault(container.pod_uid, [])
+        pod_containers.append(container)
+    return {
+        pod_uid: PerformancePod(uid=pod_uid, containers=containers)
+        for pod_uid, containers in parsed_pods.items()
+    }
+
+
+def parse_containers_metadata(metrics) -> Mapping[ContainerName, ContainerMetadata]:
+    containers = {}
+    for metric in metrics:
+        if (container_name := metric["container_name"]) in containers:
+            continue
+        containers[ContainerName(container_name)] = ContainerMetadata(
+            name=container_name, pod_uid=api.PodUID(metric["pod_uid"])
+        )
+    return containers
+
+
+def group_container_components(
+    containers_metadata: Mapping[ContainerName, ContainerMetadata],
+    containers_metrics: Mapping[ContainerName, Mapping[MetricName, PerformanceMetric]],
+    containers_rate_metrics: Optional[
+        Mapping[ContainerName, Mapping[MetricName, RateMetric]]
+    ] = None,
+) -> Iterator[PerformanceContainer]:
+    if containers_rate_metrics is None:
+        containers_rate_metrics = {}
+
+    for container in containers_metadata.values():
+        yield PerformanceContainer(
+            name=container.name,
+            pod_uid=container.pod_uid,
+            metrics=containers_metrics[container.name],
+            rate_metrics=containers_rate_metrics.get(container.name),
+        )
 
 
 def main(args: Optional[List[str]] = None) -> int:
@@ -700,57 +920,80 @@ def main(args: Optional[List[str]] = None) -> int:
 
             cluster = Cluster.from_api_server(api_server)
 
-            # Sections based on API server
-            output_cluster_api_sections(cluster)
-            output_nodes_api_sections(cluster.nodes())
-            output_deployments_api_sections(cluster.deployments())
-            output_pods_api_sections(cluster.pods())  # TODO: make more explicit
+            # Sections based on API server data
+            write_cluster_api_sections(cluster)
+            write_nodes_api_sections(cluster.nodes())
+            write_deployments_api_sections(cluster.deployments())
+            write_pods_api_sections(cluster.pods())  # TODO: make more explicit
 
-            # Sections based on cluster agent live data
-            performance_metrics = collect_metrics_from_cluster_agent(
+            # Sections based on cluster collector performance data
+            collected_metrics = request_metrics_from_cluster_collector(
                 arguments.cluster_agent_endpoint, arguments.verify_cert
             )
+            performance_metrics = parse_performance_metrics(collected_metrics)
 
-            performance_containers = group_metrics_by_containers(performance_metrics)
+            relevant_counter_metrics = [MetricName("cpu_usage_seconds_total")]
+            performance_counter_metrics = filter_specific_metrics(
+                performance_metrics, metric_names=relevant_counter_metrics
+            )
+            containers_counter_metrics = group_metrics_by_container(performance_counter_metrics)
+
+            # We only persist the relevant counter metrics (not all metrics)
+            current_cycle_store = ContainersStore(
+                containers={
+                    container_name: ContainerMetricsStore(name=container_name, metrics=metrics)
+                    for container_name, metrics in containers_counter_metrics.items()
+                }
+            )
+
+            # TODO: file_name must be adjusted when adding multi-cluster/rule support later
+            store_file_name = "containers_counters.json"
+            previous_cycle_store = load_containers_store(
+                path=AGENT_TMP_PATH, file_name=store_file_name
+            )
+            containers_rate_metrics = determine_rate_metrics(
+                current_cycle_store.containers, previous_cycle_store.containers
+            )
+            persist_containers_store(
+                current_cycle_store, path=AGENT_TMP_PATH, file_name=store_file_name
+            )
+
+            containers_metrics = group_metrics_by_container(
+                performance_metrics, omit_metrics=relevant_counter_metrics
+            )
+            containers_metadata = parse_containers_metadata(collected_metrics)
+            performance_containers = group_container_components(
+                containers_metadata, containers_metrics, containers_rate_metrics
+            )
+
             performance_pods = group_containers_by_pods(performance_containers)
+
             uid_piggyback_mappings = map_uid_to_piggyback_host_name(cluster.pods())
 
+            # Write performance sections
             for pod in filter_outdated_pods(
                 list(performance_pods.values()), uid_piggyback_mappings
             ):
                 with ConditionalPiggybackSection(f"pod_{uid_piggyback_mappings[pod.uid]}"):
-                    pod_performance_sections(pod.containers)
+                    pod_performance_sections(pod)
 
             for node in cluster.nodes():
-                with ConditionalPiggybackSection(f"node_{node.name}"):
-                    node_performance_sections(
-                        [
-                            performance_pods[pod.uid]
-                            for pod in node.pods(phase=api.Phase.RUNNING)
-                            if pod.uid in performance_pods
-                        ]
-                    )
+                write_kube_object_performance_section(
+                    node,
+                    performance_pods,
+                    piggyback_name=f"node_{node.name}",
+                )
 
             for deployment in cluster.deployments():
-                with ConditionalPiggybackSection(
-                    f"deployment_{deployment.name(prepend_namespace=True)}"
-                ):
-                    deployment_performance_sections(
-                        [
-                            performance_pods[pod.uid]
-                            for pod in deployment.pods(phase=api.Phase.RUNNING)
-                            if pod.uid in performance_pods
-                        ]
-                    )
-
-            with ConditionalPiggybackSection("cluster_kube"):  # TODO: make name configurable
-                cluster_performance_sections(
-                    [
-                        performance_pods[pod.uid]
-                        for pod in cluster.pods(phase=api.Phase.RUNNING)
-                        if pod.uid in performance_pods
-                    ]
+                write_kube_object_performance_section(
+                    deployment,
+                    performance_pods,
+                    piggyback_name=f"deployment_{deployment.name(prepend_namespace=True)}",
                 )
+
+            # TODO: make name configurable when introducing multi-cluster support
+            # remember that host with k8 rule must have at least one service
+            write_kube_object_performance_section(cluster, performance_pods)
 
             # TODO: handle pods with no performance data (pod.uid not in performance pods)
 

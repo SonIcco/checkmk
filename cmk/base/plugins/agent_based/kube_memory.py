@@ -1,22 +1,42 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2022 tribe29 GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import json
-from typing import Mapping, Optional
+from typing import Optional
+
+from cmk.base.plugins.agent_based.utils.k8s import Memory
+from cmk.base.plugins.agent_based.utils.kube_resources import (
+    check_with_utilization,
+    DEFAULT_PARAMS,
+    iterate_resources,
+    Params,
+    Resources,
+    result_for_exceptional_resource,
+)
 
 from .agent_based_api.v1 import Metric, register, render, Result, Service, State
 from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
-from .utils.k8s import Memory, Resources
-from .utils.memory import check_element, MemoryLevels
 
 
 def parse_memory_resources(string_table: StringTable) -> Resources:
+    """
+    >>> parse_memory_resources([['{"request": 23120704.0, "limit": 28120704.0}']])
+    Resources(request=23120704.0, limit=28120704.0)
+    >>> parse_memory_resources([['{"request": "unspecified", "limit": "unspecified"}']])
+    Resources(request=<ExceptionalResource.unspecified: 'unspecified'>, limit=<ExceptionalResource.unspecified: 'unspecified'>)
+    >>> parse_memory_resources([['{"request": 0.0, "limit": "zero"}']])
+    Resources(request=0.0, limit=<ExceptionalResource.zero: 'zero'>)
+    """
     return Resources(**json.loads(string_table[0][0]))
 
 
 def parse_performance_memory(string_table: StringTable) -> Memory:
+    """
+    >>> parse_performance_memory([['{"memory_usage_bytes": 18120704.0}']])
+    Memory(memory_usage_bytes=18120704.0)
+    """
     return Memory(**json.loads(string_table[0][0]))
 
 
@@ -34,100 +54,56 @@ register.agent_section(
 )
 
 
-def discovery(section_kube_memory_resources, section_k8s_live_memory) -> DiscoveryResult:
-    if section_kube_memory_resources:
+# TODO Add different logic, service should always be discovered, but instead be pending
+# (not unknown)
+def discovery_kube_memory(
+    section_kube_memory_resources, section_k8s_live_memory
+) -> DiscoveryResult:
+    if section_k8s_live_memory is not None and section_kube_memory_resources is not None:
         yield Service()
 
 
-def _output_config_summaries(requests: float, limits: float):
-    if requests == float("inf"):
-        requests_summary = "no requests value specified for at least one pod"
-    else:
-        requests_summary = f"{render.bytes(requests)}"
-
-    if limits == float("inf"):
-        limits_summary = "no limit value specified for at least one pod"
-    else:
-        limits_summary = f"{render.bytes(limits)}"
-
-    yield Result(state=State.OK, summary=f"Configured Requests: {requests_summary}")
-    yield Result(state=State.OK, summary=f"Configured Limits: {limits_summary}")
-
-
-def _render_absolute_metrics(usage: float, requests: float, limits: float):
-    """Render metrics based on absolute values and display in same graph"""
-
-    yield Metric("k8s_mem_used", usage)
-
-    if requests != float("inf"):
-        yield Metric("k8s_memory_requests", requests)
-
-    if limits != float("inf"):
-        yield Metric("k8s_memory_limit", limits)
-
-
-def _output_memory_usage(total_usage: float, limits: float, levels=Optional[MemoryLevels]):
-    if limits == float("inf"):
-        yield Result(state=State.OK, summary=f"Usage: {render.bytes(total_usage)}")
-        return
-
-    result, metric = check_element(
-        "Usage",
-        used=total_usage,
-        total=limits,
-        levels=levels,
-        create_percent_metric=True,
-    )
-
-    if not isinstance(result, Result):
-        raise TypeError("usage result is not of type Result")
-
-    if not isinstance(metric, Metric):
-        raise TypeError("usage metric is not of type Metric")
-
-    yield result
-    yield Metric(
-        name="k8s_mem_used_percent",
-        value=metric.value,
-        levels=metric.levels,
-        boundaries=metric.boundaries,
-    )
-
-
-def check(
-    params: Mapping[str, MemoryLevels],
+# TODO This should be moved to utils, and used jointly by kube_container_memory and kube_container_cpu
+# TODO Add Perf-O-Meter
+def check_kube_memory(
+    params: Params,
     section_kube_memory_resources: Optional[Resources],
     section_k8s_live_memory: Optional[Memory],
 ) -> CheckResult:
-    if not section_kube_memory_resources:
+    if section_k8s_live_memory is None or section_kube_memory_resources is None:
         return
 
-    if section_k8s_live_memory:
-        total_usage = sum(
-            [container.memory_usage_bytes.value for container in section_k8s_live_memory.containers]
-        )
-        yield from _output_memory_usage(
-            total_usage=total_usage,
-            limits=section_kube_memory_resources.limit,
-            levels=params.get("levels_ram"),
-        )
-        yield from _render_absolute_metrics(
-            total_usage,
-            section_kube_memory_resources.requests,
-            section_kube_memory_resources.limit,
-        )
+    total_usage = section_k8s_live_memory.memory_usage_bytes
+    yield Result(state=State.OK, summary=f"Usage: {render.bytes(total_usage)}")
+    yield Metric("kube_memory_usage", total_usage)
 
-    yield from _output_config_summaries(
-        section_kube_memory_resources.requests, section_kube_memory_resources.limit
-    )
+    for requirement_name, requirement in iterate_resources(section_kube_memory_resources):
+        if requirement == 0:
+            yield Result(
+                state=State.OK,
+                summary=f"{requirement_name.title()}: n/a",
+                details=f"{requirement_name.title()}: set to zero for all containers",
+            )
+        elif isinstance(requirement, float):
+            param = params[requirement_name]
+            yield from check_with_utilization(
+                total_usage,
+                "memory",
+                requirement_name,
+                requirement,
+                param,
+                render.bytes,
+            )
+        else:
+            yield result_for_exceptional_resource(requirement_name, requirement)
 
 
 register.check_plugin(
-    name="kube_memory",
-    service_name="Memory",
+    name="kube_memory",  # TODO change this plugin name
+    service_name="Container memory",  # TODO change this service name
     sections=["kube_memory_resources", "k8s_live_memory"],
-    discovery_function=discovery,
-    check_function=check,
-    check_ruleset_name="k8s_memory",
-    check_default_parameters={"levels_ram": ("perc_used", (80.0, 90.0))},
+    discovery_function=discovery_kube_memory,
+    check_function=check_kube_memory,
+    check_ruleset_name="kube_memory",
+    check_default_parameters=DEFAULT_PARAMS,
 )

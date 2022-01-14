@@ -348,7 +348,9 @@ node_modules/.bin/redoc-cli: .ran-npm
 node_modules/.bin/prettier: .ran-npm
 .ran-npm: package.json package-lock.json
 	@echo "npm version: $$(npm --version)"
+	npm --version | grep "^$(NPM_VERSION)\." >/dev/null 2>&1
 	@echo "node version: $$(node --version)"
+	node --version | grep "^v$(NODEJS_VERSION)\." >/dev/null 2>&1
 	@echo "open file descriptor limit (soft): $$(ulimit -Sn)"
 	@echo "open file descriptor limit (hard): $$(ulimit -Hn)"
 	@if curl --silent --output /dev/null --head '${ARTIFACT_STORAGE}/#browse/browse:npm-proxy'; then \
@@ -474,7 +476,10 @@ setup:
 	    ksh \
 	    p7zip-full \
 	    zlib1g-dev
-	sudo -H pip3 install -U pipenv wheel
+	sudo -H pip3 install -U \
+	    pipenv=="$(PIPENV_VERSION)" \
+	    virtualenv=="$(VIRTUALENV_VERSION)" \
+	    wheel
 	$(MAKE) -C web setup
 	$(MAKE) -C omd setup
 	$(MAKE) -C omd openhardwaremonitor-setup
@@ -634,7 +639,7 @@ Pipfile.lock: Pipfile
 	@( \
 	    echo "Locking Python requirements..." ; \
 	    flock $(LOCK_FD); \
-	    SKIP_MAKEFILE_CALL=1 $(PIPENV) lock --pre; RC=$$? ; \
+	    SKIP_MAKEFILE_CALL=1 $(PIPENV) lock; RC=$$? ; \
 	    rm -rf .venv ; \
 	    exit $$RC \
 	) $(LOCK_FD)>$(LOCK_PATH)
@@ -649,7 +654,7 @@ Pipfile.lock: Pipfile
 	    echo "Creating .venv..." ; \
 	    flock $(LOCK_FD); \
 	    $(RM) -r .venv; \
-	    ( SKIP_MAKEFILE_CALL=1 $(PIPENV) sync --pre --dev && touch .venv ) || ( $(RM) -r .venv ; exit 1 ) \
+	    ( SKIP_MAKEFILE_CALL=1 $(PIPENV) sync --dev && touch .venv ) || ( $(RM) -r .venv ; exit 1 ) \
 	) $(LOCK_FD)>$(LOCK_PATH)
 
 # This dummy rule is called from subdirectories whenever one of the

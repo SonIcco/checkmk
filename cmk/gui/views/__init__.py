@@ -666,7 +666,7 @@ class View:
             self.spec["single_infos"], self.context
         )
 
-        # Special hack for the situation where hostgroup views link to host views: The host view uses
+        # Special hack for the situation where host group views link to host views: The host view uses
         # the datasource "hosts" which does not have the "hostgroup" info, but is configured to have a
         # single_info "hostgroup". To make this possible there exists a feature in
         # (ABCDataSource.link_filters, views._patch_view_context) which is a very specific hack. Have a
@@ -1196,7 +1196,7 @@ class GUIViewRenderer(ABCViewRenderer):
 
 
 def load_plugins() -> None:
-    """Plugin initialization hook (Called by cmk.gui.modules.call_load_plugins_hooks())"""
+    """Plugin initialization hook (Called by cmk.gui.main_modules.load_plugins())"""
     _register_pre_21_plugin_api()
     utils.load_web_plugins("views", globals())
     utils.load_web_plugins("icons", globals())
@@ -1632,9 +1632,9 @@ def format_view_title(name, view):
     elif "host" in infos:
         title_parts.append(_("Hosts"))
     elif "hostgroup" in infos:
-        title_parts.append(_("Hostgroups"))
+        title_parts.append(_("Host groups"))
     elif "servicegroup" in infos:
-        title_parts.append(_("Servicegroups"))
+        title_parts.append(_("Service groups"))
 
     title_parts.append("%s (%s)" % (_u(view["title"]), name))
 
@@ -2105,7 +2105,7 @@ def page_view():
         _patch_view_context(view_spec)
 
         datasource = data_source_registry[view_spec["datasource"]]()
-        context = visuals.active_context_from_request(datasource.infos) or view_spec["context"]
+        context = visuals.active_context_from_request(datasource.infos, view_spec["context"])
 
         view = View(view_name, view_spec, context)
         view.row_limit = get_limit()

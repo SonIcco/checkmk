@@ -262,7 +262,7 @@ def get_snapshot_status(snapshot, validate_checksums=False, check_correct_core=T
 
         cmk_tar = io.BytesIO(access_snapshot(lambda x: _get_file_content(x, "check_mk.tar.gz")))
         files = _list_tar_content(cmk_tar)
-        using_cmc = os.path.exists(cmk.utils.paths.omd_root + "/etc/check_mk/conf.d/microcore.mk")
+        using_cmc = (cmk.utils.paths.omd_root / "etc/check_mk/conf.d/microcore.mk").exists()
         snapshot_cmc = "conf.d/microcore.mk" in files
         if using_cmc and not snapshot_cmc:
             raise MKGeneralException(
@@ -492,7 +492,7 @@ def extract_snapshot(tar: tarfile.TarFile, domains: Dict[str, DomainSpec]) -> No
             return errors
 
         for line in stdout:
-            full_path = prefix + "/" + line
+            full_path = str(prefix) + "/" + line
             path_tokens = full_path.split("/")
             check_exists_or_writable(path_tokens)
 

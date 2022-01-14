@@ -289,7 +289,7 @@ class PermissionSectionDashboard(PermissionSection):
 
 
 def load_plugins() -> None:
-    """Plugin initialization hook (Called by cmk.gui.modules.call_load_plugins_hooks())"""
+    """Plugin initialization hook (Called by cmk.gui.main_modules.load_plugins())"""
     _register_pre_21_plugin_api()
 
     # Load plugins for dashboards. Currently these files
@@ -577,7 +577,7 @@ def draw_dashboard(name: DashboardName) -> None:
     board = _add_context_to_dashboard(board)
 
     # Like _dashboard_info_handler we assume that only host / service filters are relevant
-    board_context = visuals.active_context_from_request(["host", "service"]) or board["context"]
+    board_context = visuals.active_context_from_request(["host", "service"], board["context"])
     board["context"] = board_context
 
     title = visuals.visual_title("dashboard", board, board_context)
@@ -1389,9 +1389,9 @@ def _dashboard_add_checkmk_dashlet_entries(name: DashboardName) -> Iterable[Page
     )
 
     yield PageMenuEntry(
-        title="User notifications",
+        title="User messages",
         icon_name="notifications",
-        item=_dashboard_add_non_view_dashlet_link(name, "notify_users"),
+        item=_dashboard_add_non_view_dashlet_link(name, "user_messages"),
     )
 
     yield PageMenuEntry(
@@ -1576,7 +1576,7 @@ def ajax_dashlet() -> None:
         raise MKUserError("name", _("The requested dashboard does not exist."))
 
     board = _add_context_to_dashboard(board)
-    board_context = visuals.active_context_from_request(["host", "service"]) or board["context"]
+    board_context = visuals.active_context_from_request(["host", "service"], board["context"])
     board["context"] = board_context
 
     ident = request.get_integer_input_mandatory("id")
@@ -1859,7 +1859,10 @@ def choose_view(name: DashboardName, title: str, create_dashlet_spec_func: Calla
         no_preselect=True,
     )
 
-    dashboard = get_permitted_dashboards()[name]
+    try:
+        dashboard = get_permitted_dashboards()[name]
+    except KeyError:
+        raise MKUserError("name", _("The requested dashboard does not exist."))
 
     breadcrumb = _dashlet_editor_breadcrumb(name, dashboard, title)
     html.header(title, breadcrumb=breadcrumb, page_menu=_choose_view_page_menu(breadcrumb))

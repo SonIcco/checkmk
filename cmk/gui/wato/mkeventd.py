@@ -151,8 +151,8 @@ from cmk.gui.watolib.search import (
 )
 
 
-def _compiled_mibs_dir():
-    return cmk.utils.paths.omd_root + "/local/share/check_mk/compiled_mibs"
+def _compiled_mibs_dir() -> Path:
+    return cmk.utils.paths.omd_root / "local/share/check_mk/compiled_mibs"
 
 
 # .
@@ -2885,7 +2885,7 @@ class ConfigVariableGroupEventConsoleGeneric(ConfigVariableGroupEventConsole):
 @config_variable_group_registry.register
 class ConfigVariableGroupEventConsoleLogging(ConfigVariableGroupEventConsole):
     def title(self):
-        return _("Event Console: Logging & Diagnose")
+        return _("Event Console: Logging & diagnose")
 
     def sort_index(self):
         return 19
@@ -3044,13 +3044,12 @@ class ModeEventConsoleMIBs(ABCEventConsoleMode):
         # Also delete the compiled files
         compiled_mibs_dir = _compiled_mibs_dir()
         for f in [
-            compiled_mibs_dir + "/" + mib_name + ".py",
-            compiled_mibs_dir + "/" + mib_name + ".pyc",
-            compiled_mibs_dir + "/" + filename.rsplit(".", 1)[0].upper() + ".py",
-            compiled_mibs_dir + "/" + filename.rsplit(".", 1)[0].upper() + ".pyc",
+            compiled_mibs_dir / mib_name + ".py",
+            compiled_mibs_dir / mib_name + ".pyc",
+            compiled_mibs_dir / filename.rsplit(".", 1)[0].upper() + ".py",
+            compiled_mibs_dir / filename.rsplit(".", 1)[0].upper() + ".pyc",
         ]:
-            if os.path.exists(f):
-                os.remove(f)
+            f.unlink(missing_ok=True)
 
     def page(self):
         self._verify_ec_enabled()

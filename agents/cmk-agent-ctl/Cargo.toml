@@ -5,7 +5,7 @@
 [package]
 name = "cmk-agent-ctl"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -27,3 +27,6 @@ base64 = { version = "*" }
 string_enum = { version = "*" }
 requestty = { version = "*" }
 x509-parser = { version = "*" }
+thiserror = { version = "*" }
+tempfile = { version = "*" }
+zstd = { version = "*" }

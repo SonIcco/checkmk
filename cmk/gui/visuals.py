@@ -133,7 +133,7 @@ title_functions: List[Callable] = []
 
 
 def load_plugins() -> None:
-    """Plugin initialization hook (Called by cmk.gui.modules.call_load_plugins_hooks())"""
+    """Plugin initialization hook (Called by cmk.gui.main_modules.load_plugins())"""
     global title_functions
     title_functions = []
     _register_pre_21_plugin_api()
@@ -331,10 +331,10 @@ def transform_old_visual(visual):
     visual.setdefault("is_show_more", False)
 
     # 2.1
-    visual["context"] = cleaup_context_filters(visual["context"], visual["single_infos"])
+    visual["context"] = cleanup_context_filters(visual["context"], visual["single_infos"])
 
 
-def cleaup_context_filters(context, single_infos: SingleInfos) -> VisualContext:
+def cleanup_context_filters(context, single_infos: SingleInfos) -> VisualContext:
     # Fix context into type VisualContext
     if filter_conf := context.get("discovery_state"):
         # CMK-6606: States were saved as bools instead of str
@@ -1730,17 +1730,20 @@ class VisualFilterListWithAddPopup(VisualFilterList):
         html.javascript("cmk.utils.add_simplebar_scrollbar(%s);" % json.dumps(filter_list_id))
 
 
-def active_context_from_request(infos: List[str]) -> VisualContext:
+def active_context_from_request(infos: List[str], context: VisualContext) -> VisualContext:
     vs_filterlist = VisualFilterListWithAddPopup(info_list=infos)
     if request.has_var("_active"):
         return vs_filterlist.from_html_vars("")
+
     # Test if filters are in url and rescostruct them. This is because we
     # contruct crosslinks manually without the filter menu.
+    # We must merge with the view context as many views have defaults, which
+    # are not included in the crosslink.
     if flag := active_filter_flag(set(vs_filterlist._filters.keys()), request.itervars()):
         with request.stashed_vars():
             request.set_var("_active", flag)
-            return vs_filterlist.from_html_vars("")
-    return {}
+            return get_merged_context(context, vs_filterlist.from_html_vars(""))
+    return context
 
 
 @page_registry.register_page("ajax_visual_filter_list_get_choice")

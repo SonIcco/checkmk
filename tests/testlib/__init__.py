@@ -23,7 +23,6 @@ import urllib3  # type: ignore[import]
 
 from tests.testlib.compare_html import compare_html
 from tests.testlib.event_console import CMKEventConsole, CMKEventConsoleStatus
-from tests.testlib.fixtures import ec, web
 from tests.testlib.site import Site, SiteFactory
 from tests.testlib.utils import (
     add_python_paths,
@@ -102,7 +101,7 @@ def fake_version_and_paths():
     )
     monkeypatch.setattr("cmk.utils.paths.check_manpages_dir", "%s/checkman" % cmk_path())
     monkeypatch.setattr("cmk.utils.paths.web_dir", "%s/web" % cmk_path())
-    monkeypatch.setattr("cmk.utils.paths.omd_root", tmp_dir)
+    monkeypatch.setattr("cmk.utils.paths.omd_root", Path(tmp_dir))
     monkeypatch.setattr("cmk.utils.paths.tmp_dir", os.path.join(tmp_dir, "tmp/check_mk"))
     monkeypatch.setattr(
         "cmk.utils.paths.counters_dir", os.path.join(tmp_dir, "tmp/check_mk/counters")
@@ -209,6 +208,8 @@ def fake_version_and_paths():
         "agent_receiver.constants.REGISTRATION_REQUESTS",
         Path(tmp_dir, "registration_request"),
     )
+
+    # Agent registration paths
     monkeypatch.setattr(
         "cmk.utils.paths.received_outputs_dir",
         Path(cmk.utils.paths.var_dir, "agent-receiver/received-outputs"),
@@ -216,6 +217,30 @@ def fake_version_and_paths():
     monkeypatch.setattr(
         "cmk.utils.paths.data_source_push_agent_dir",
         Path(cmk.utils.paths.data_source_cache_dir, "push-agent"),
+    )
+    monkeypatch.setattr(
+        "cmk.utils.paths._r4r_base_dir",
+        Path(cmk.utils.paths.var_dir, "wato/requests-for-registration"),
+    )
+    monkeypatch.setattr(
+        "cmk.utils.paths.r4r_new_dir",
+        Path(cmk.utils.paths._r4r_base_dir, "NEW"),
+    )
+    monkeypatch.setattr(
+        "cmk.utils.paths.r4r_pending_dir",
+        Path(cmk.utils.paths._r4r_base_dir, "PENDING"),
+    )
+    monkeypatch.setattr(
+        "cmk.utils.paths.r4r_declined_dir",
+        Path(cmk.utils.paths._r4r_base_dir, "DECLINED"),
+    )
+    monkeypatch.setattr(
+        "cmk.utils.paths.r4r_ready_dir",
+        Path(cmk.utils.paths._r4r_base_dir, "READY"),
+    )
+    monkeypatch.setattr(
+        "cmk.utils.paths.r4r_discoverable_dir",
+        Path(cmk.utils.paths._r4r_base_dir, "DISCOVERABLE"),
     )
 
 
@@ -336,10 +361,10 @@ class WatchLog:
         return False
 
 
-def create_linux_test_host(request, web_fixture, site: Site, hostname):
+def create_linux_test_host(request, site: Site, hostname):
     def finalizer():
-        web_fixture.delete_host(hostname)
-        web_fixture.activate_changes()
+        site.openapi.delete_host(hostname)
+        site.activate_changes_and_wait_for_core_reload()
 
         for path in [
             "var/check_mk/agent_output/%s" % hostname,
@@ -360,7 +385,7 @@ def create_linux_test_host(request, web_fixture, site: Site, hostname):
 
     request.addfinalizer(finalizer)
 
-    web_fixture.add_host(hostname, attributes={"ipaddress": "127.0.0.1"})
+    site.openapi.create_host(hostname, attributes={"ipaddress": "127.0.0.1"})
 
     site.write_text_file(
         "etc/check_mk/conf.d/linux_test_host_%s.mk" % hostname,

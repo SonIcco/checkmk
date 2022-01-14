@@ -10,6 +10,7 @@ from typing import Dict, Iterable, Mapping, Tuple
 
 from cmk.utils.type_defs import MetricName
 
+import cmk.gui.mkeventd as mkeventd
 import cmk.gui.sites as sites
 import cmk.gui.watolib as watolib
 from cmk.gui.exceptions import MKUserError
@@ -28,6 +29,7 @@ from cmk.gui.plugins.visuals.utils import (
     livestatus_query_bare,
     livestatus_query_bare_string,
 )
+from cmk.gui.query_filters import sites_options
 from cmk.gui.type_defs import Choices
 from cmk.gui.valuespec import autocompleter_registry
 
@@ -78,26 +80,72 @@ def config_hostname_autocompleter(value: str, params: Dict) -> Choices:
     return match_list
 
 
-@autocompleter_registry.register_expression("opthostgroup")
+@autocompleter_registry.register_expression("sites")
+def sites_autocompleter(value: str, params: Dict) -> Choices:
+    """Return the matching list of dropdown choices
+    Called by the webservice with the current input field value and the completions_params to get the list of choices"""
+
+    choices: Choices = sorted(
+        (v for v in sites_options() if value.lower() in v[1].lower()),
+        key=lambda a: a[1].lower(),
+    )
+
+    # This part should not exists as the optional(not enforce) would better be not having the filter at all
+    if not params.get("strict"):
+        empty_choice: Choices = [("", "")]
+        choices = empty_choice + choices
+    return choices
+
+
+@autocompleter_registry.register_expression("allgroups")
 def hostgroup_autocompleter(value: str, params: Dict) -> Choices:
     """Return the matching list of dropdown choices
     Called by the webservice with the current input field value and the completions_params to get the list of choices"""
-
-    return sorted(
-        (v for v in sites.all_groups("host") if value.lower() in v[1].lower()),
+    group_type = params["group_type"]
+    # Have something without ifs
+    group_type = (
+        "contact" if "_contact" in group_type else "host" if "host" in group_type else "service"
+    )
+    choices: Choices = sorted(
+        (v for v in sites.all_groups(group_type) if value.lower() in v[1].lower()),
         key=lambda a: a[1].lower(),
     )
+    # This part should not exists as the optional(not enforce) would better be not having the filter at all
+    if not params.get("strict"):
+        empty_choice: Choices = [("", "")]
+        choices = empty_choice + choices
+    return choices
 
 
-@autocompleter_registry.register_expression("optservicegroup")
-def service_autocompleter(value: str, params: Dict) -> Choices:
+@autocompleter_registry.register_expression("check_cmd")
+def check_command_autocompleter(value: str, params: Dict) -> Choices:
     """Return the matching list of dropdown choices
     Called by the webservice with the current input field value and the completions_params to get the list of choices"""
+    choices: Choices = [
+        (x, x)
+        for x in sites.live().query_column_unique("GET commands\nCache: reload\nColumns: name\n")
+        if value.lower() in x.lower()
+    ]
+    empty_choices: Choices = [("", "")]
+    return empty_choices + choices
 
-    return sorted(
-        (v for v in sites.all_groups("service") if value.lower() in v[1].lower()),
-        key=lambda a: a[1].lower(),
-    )
+
+@autocompleter_registry.register_expression("service_levels")
+def service_levels_autocompleter(value: str, params: Dict) -> Choices:
+    """Return the matching list of dropdown choices
+    Called by the webservice with the current input field value and the completions_params to get the list of choices"""
+    choices: Choices = mkeventd.service_levels()
+    empty_choices: Choices = [("", "")]
+    return empty_choices + choices
+
+
+@autocompleter_registry.register_expression("syslog_facilities")
+def syslog_facilities_autocompleter(value: str, params: Dict) -> Choices:
+    """Return the matching list of dropdown choices
+    Called by the webservice with the current input field value and the completions_params to get the list of choices"""
+    choices: Choices = [(str(v), title) for v, title in mkeventd.syslog_facilities]
+    empty_choices: Choices = [("", "")]
+    return empty_choices + choices
 
 
 @autocompleter_registry.register_expression("monitored_service_description")

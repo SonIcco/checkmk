@@ -1182,8 +1182,18 @@ def test_host_config_custom_checks(
         (
             "testhost2",
             [
-                ("checkgroup", "checktype1", "item1", TimespecificParameterSet({"param1": 1}, ())),
-                ("checkgroup", "checktype2", "item2", TimespecificParameterSet({"param2": 2}, ())),
+                (
+                    "checkgroup",
+                    CheckPluginName("checktype1"),
+                    "item1",
+                    TimespecificParameterSet({"param1": 1}, ()),
+                ),
+                (
+                    "checkgroup",
+                    CheckPluginName("checktype2"),
+                    "item2",
+                    TimespecificParameterSet({"param2": 2}, ()),
+                ),
             ],
         ),
     ],
@@ -2413,7 +2423,7 @@ def test_host_config_add_discovery_check(
 def test_get_config_file_paths_with_confd(folder_path_test_config: None) -> None:
     rel_paths = [
         "%s" % p.relative_to(cmk.utils.paths.default_config_dir)
-        for p in config._get_config_file_paths(with_conf_d=True)
+        for p in config.get_config_file_paths(with_conf_d=True)
     ]
     assert rel_paths == [
         "main.mk",

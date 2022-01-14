@@ -26,6 +26,17 @@ inpath() {
     command -v "${1:?No command to test}" >/dev/null 2>&1
 }
 
+get_epoch() {
+    date +%s 2>/dev/null ||
+        perl -e 'print($^T."\n");'
+}
+
+get_file_atime() {
+    stat -c %X "${1}" 2>/dev/null ||
+        stat -f %a "${1}" 2>/dev/null ||
+        perl -e 'if (! -f $ARGV[0]){die "0000000"};$atime=(stat($ARGV[0]))[8];print $atime."\n";' "${1}"
+}
+
 get_file_mtime() {
     stat -c %Y "${1}" 2>/dev/null ||
         stat -f %m "${1}" 2>/dev/null ||
@@ -190,14 +201,14 @@ set_up_profiling() {
 #
 
 read_python_version() {
-    if inpath "$1"; then
-        version=$($1 -c 'import sys; print("%s.%s"%(sys.version_info[0], sys.version_info[1]))')
+    if inpath "${1}"; then
+        version=$(${1} -c 'import sys; print("%s.%s"%(sys.version_info[0], sys.version_info[1]))')
 
         major=${version%%.*}
         minor=${version##*.}
 
-        if [ "$major" -eq "$2" ] && [ "$minor" -ge "$3" ]; then
-            echo "$1"
+        if [ "${major}" -eq "${2}" ] && [ "${minor}" -ge "${3}" ]; then
+            echo "${1}"
             return 0
         fi
     fi
@@ -209,7 +220,7 @@ preamble_3() {
     PYTHON2=$(read_python_version python2 2 6 || read_python_version python 2 6)
     if [ -f "${MK_CONFDIR}/python_path.cfg" ]; then
         # shellcheck source=/dev/null
-        . "{$MK_CONFDIR}/python_path.cfg"
+        . "${MK_CONFDIR}/python_path.cfg"
     fi
     export PYTHON2 PYTHON3
 
@@ -240,7 +251,7 @@ waitmax() {
    # Wait for termination within TIMOUT seconds
    while [ "${TIMEOUT}" -gt 0 ]; do
        TIMEOUT=$((TIMEOUT - 1))
-       if [ ! -e /proc/$PID ]; then
+       if [ ! -e /proc/${PID} ]; then
            return 0
        fi
        perl -e "select(undef, undef, undef, 0.1);"
@@ -248,7 +259,7 @@ waitmax() {
 
    # Process did not terminate in time. Kill and
    # return with an error
-   kill -9 $PID
+   kill -9 ${PID}
    return 255
 }
 
@@ -380,9 +391,9 @@ section_cpu() {
 section_aix_if() {
     echo "<<<aix_if>>>"
     for ent in $(ifconfig -a | grep '^en' | cut -d ":" -f 1); do
-        echo "[$ent]"
-        entstat "$ent" | grep -E "(^Hardware|^Bytes:|^Packets:|^Transmit|^Broadcast:|^Multicast:)"
-        entstat "$ent" | grep -p "Driver Flags:"
+        echo "[${ent}]"
+        entstat "${ent}" | grep -E "(^Hardware|^Bytes:|^Packets:|^Transmit|^Broadcast:|^Multicast:)"
+        entstat "${ent}" | grep -p "Driver Flags:"
     done
 }
 
@@ -561,11 +572,11 @@ section_job() {
 }
 
 run_cached() {
-    NAME=$1
+    NAME=${1}
     # Be aware: Maxage was expected to be given in minutes but this was
     # confusing because all other agents use seconds here. So this has
     # been changed to be compatible.
-    MAXAGE=$2
+    MAXAGE=${2}
     shift 2
     CMDLINE=$*
 
@@ -575,27 +586,29 @@ run_cached() {
         return
     fi
 
+    NOW=$(get_epoch)
+
     if [ ! -e "${MK_VARDIR}/cache" ]; then mkdir -p "${MK_VARDIR}/cache"; fi
-    CACHEFILE=$MK_VARDIR/cache/$NAME.cache
+    CACHEFILE="${MK_VARDIR}/cache/${NAME}.cache"
 
     USE_CACHEFILE=""
     # Check if file exists and is recent enough
     if [ -s "${CACHEFILE}" ]; then
-        AGE=$(/usr/bin/perl -e 'if (! -f $ARGV[0]){die "0000000"};$mtime=(stat($ARGV[0]))[9];print ($^T-$mtime);' ${CACHEFILE} )
+        AGE=$((NOW - $(get_file_mtime "${CACHEFILE}")))
         if (( AGE < MAXAGE )); then
             USE_CACHEFILE=1
         fi
 
         if ${MK_RUN_SYNC_PARTS}; then
             # get file time for cache
-            MTIME=$(/usr/bin/perl -e 'print((stat shift)[9])' ${CACHEFILE})
+            MTIME=$(get_file_mtime "${CACHEFILE}")
             CACHE_INFO="cached(${MTIME},${MAXAGE})"
             if [[ ${NAME} == local_* ]]; then
-                sed -e "/^<<</! s/^/${CACHE_INFO} /" "${CACHEFILE}"
+                # prefix CACHE_INFO, but skip any headers and lines with existing CACHE_INFO
+                sed -e "/^<<<.*>>>/n; /^cached([0-9]*,[0-9]*) /n; s/^/${CACHE_INFO} /" "${CACHEFILE}"
             else
-                # insert the cache info in the section header (^= after '!'),
-                # if none is present (^= before '!')
-                sed -e '/^<<<.*\(:cached(\).*>>>/!s/^<<<\([^>]*\)>>>$/<<<\1:'"${CACHE_INFO}"'>>>/' "${CACHEFILE}"
+                # insert CACHE_INFO in header, but skip headers with existing CACHE_INFO
+                sed -e '/^<<<.*\(:cached(\).*>>>/n; s/^<<<\([^>]*\)>>>$/<<<\1:'"${CACHE_INFO}"'>>>/' "${CACHEFILE}"
             fi
         fi
     fi
@@ -612,7 +625,7 @@ run_cached() {
 #
 
 run_local_checks() {
-    cd "$LOCALDIR" || return
+    cd "${LOCALDIR}" || return
 
     if ${MK_RUN_SYNC_PARTS}; then
         echo '<<<local:sep(0)>>>'
@@ -635,7 +648,7 @@ run_spooler() {
     (
         cd "${SPOOLDIR}" 2>/dev/null || return
 
-        now=$(date +%s)
+        now=$(get_epoch)
 
         for file in *; do
             [ "${file}" != "*" ] || return
@@ -736,17 +749,17 @@ run_remote_plugins() {
     # caching currently not supported
     ${MK_RUN_SYNC_PARTS} || return
 
+    [ -f "${MK_CONFDIR}/mrpe.cfg" ] || return
+
     # MK's Remote Plugin Executor
-    if [ -e "${MK_CONFDIR}/mrpe.cfg" ]; then
-        echo '<<<mrpe>>>'
-        grep -Ev '^[[:space:]]*($|#)' "${MK_CONFDIR}/mrpe.cfg" | \
-        while read descr cmdline; do
-            PLUGIN=${cmdline%% *}
-            OUTPUT=$(eval "${MK_DEFINE_LOG_SECTION_TIME}; _log_section_time ${cmdline}")
-            echo "(${PLUGIN##*/}) ${descr} $? ${OUTPUT}" | tr \\n \\1
-            echo
-        done
-    fi
+    echo '<<<mrpe>>>'
+    grep -Ev '^[[:space:]]*($|#)' "${MK_CONFDIR}/mrpe.cfg" | \
+    while read descr cmdline; do
+        PLUGIN=${cmdline%% *}
+        OUTPUT=$(eval "${MK_DEFINE_LOG_SECTION_TIME}; _log_section_time ${cmdline}")
+        echo "(${PLUGIN##*/}) ${descr} $? ${OUTPUT}" | tr \\n \\1
+        echo
+    done
 }
 
 run_purely_synchronous_sections() {
@@ -754,47 +767,47 @@ run_purely_synchronous_sections() {
 
     [ -z "${MK_SKIP_CHECKMK_AGENT_PLUGINS}" ] && log_section_time section_checkmk_agent_plugins
 
-    [ -z "$MK_SKIP_DF" ] && _log_section_time section_df
+    [ -z "${MK_SKIP_DF}" ] && _log_section_time section_df
 
-    [ -z "$MK_SKIP_NFS_MOUNTS" ] && _log_section_time section_nfs_mounts
+    [ -z "${MK_SKIP_NFS_MOUNTS}" ] && _log_section_time section_nfs_mounts
 
-    [ -z "$MK_SKIP_PS" ] && _log_section_time section_ps
+    [ -z "${MK_SKIP_PS}" ] && _log_section_time section_ps
 
-    [ -z "$MK_SKIP_AIX_LPARSTAT" ] && _log_section_time section_lparstat_aix
+    [ -z "${MK_SKIP_AIX_LPARSTAT}" ] && _log_section_time section_lparstat_aix
 
-    [ -z "$MK_SKIP_AIX_VMSTAT" ] && _log_section_time section_vmstat_aix
+    [ -z "${MK_SKIP_AIX_VMSTAT}" ] && _log_section_time section_vmstat_aix
 
-    [ -z "$MK_SKIP_AIX_DISKIO" ] && _log_section_time section_aix_diskio
+    [ -z "${MK_SKIP_AIX_DISKIO}" ] && _log_section_time section_aix_diskio
 
-    [ -z "$MK_SKIP_AIX_MEM" ] && _log_section_time section_aix_memory
+    [ -z "${MK_SKIP_AIX_MEM}" ] && _log_section_time section_aix_memory
 
-    [ -z "$MK_SKIP_AIX_MPSTAT" ] && _log_section_time section_mpstat_aix
+    [ -z "${MK_SKIP_AIX_MPSTAT}" ] && _log_section_time section_mpstat_aix
 
-    [ -z "$MK_SKIP_AIX_PAGING" ] && _log_section_time section_aix_paging
+    [ -z "${MK_SKIP_AIX_PAGING}" ] && _log_section_time section_aix_paging
 
-    [ -z "$MK_SKIP_CPU" ] && _log_section_time section_cpu
+    [ -z "${MK_SKIP_CPU}" ] && _log_section_time section_cpu
 
-    [ -z "$MK_SKIP_AIX_IF" ] && _log_section_time section_aix_if
+    [ -z "${MK_SKIP_AIX_IF}" ] && _log_section_time section_aix_if
 
-    [ -z "$MK_SKIP_TIMESYNCHRONISATION" ] && _log_section_time section_ntp
+    [ -z "${MK_SKIP_TIMESYNCHRONISATION}" ] && _log_section_time section_ntp
 
-    [ -z "$MK_SKIP_MULTIPATHING" ] && _log_section_time section_multipathing
+    [ -z "${MK_SKIP_MULTIPATHING}" ] && _log_section_time section_multipathing
 
-    [ -z "$MK_SKIP_AIX_LVM" ] && _log_section_time section_aix_lvm
+    [ -z "${MK_SKIP_AIX_LVM}" ] && _log_section_time section_aix_lvm
 
-    [ -z "$MK_SKIP_TCP" ] && _log_section_time section_tcp
+    [ -z "${MK_SKIP_TCP}" ] && _log_section_time section_tcp
 
-    [ -z "$MK_SKIP_LIBELLE" ] && _log_section_time section_libelle
+    [ -z "${MK_SKIP_LIBELLE}" ] && _log_section_time section_libelle
 
-    [ -z "$MK_SKIP_MAILQUEUE" ] && _log_section_time section_mailqueue
+    [ -z "${MK_SKIP_MAILQUEUE}" ] && _log_section_time section_mailqueue
 
-    [ -z "$MK_SKIP_UPTIME" ] && _log_section_time section_uptime
+    [ -z "${MK_SKIP_UPTIME}" ] && _log_section_time section_uptime
 
-    [ -z "$MK_SKIP_FILEINFO" ] && _log_section_time section_fileinfo
+    [ -z "${MK_SKIP_FILEINFO}" ] && _log_section_time section_fileinfo
 
-    [ -z "$MK_SKIP_AIX_HACMP" ] && _log_section_time section_aix_hacmp
+    [ -z "${MK_SKIP_AIX_HACMP}" ] && _log_section_time section_aix_hacmp
 
-    [ -z "$MK_SKIP_JOB" ] && _log_section_time section_job
+    [ -z "${MK_SKIP_JOB}" ] && _log_section_time section_job
 }
 
 run_partially_asynchronous_sections() {

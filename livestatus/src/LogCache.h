@@ -13,31 +13,49 @@
 #include <map>
 #include <memory>
 #include <mutex>
+
 class Logfile;
 class Logger;
 class MonitoringCore;
+
+// We keep this on top level to make forawrd declarations possible.
+class LogFiles {
+public:
+    using container = std::map<std::chrono::system_clock::time_point,
+                               std::unique_ptr<Logfile>>;
+    using const_iterator = container::const_iterator;
+
+    explicit LogFiles(const container &log_files) : log_files_{log_files} {}
+    [[nodiscard]] auto begin() const { return log_files_.begin(); }
+    [[nodiscard]] auto end() const { return log_files_.end(); }
+
+private:
+    const container &log_files_;
+};
+
+class LogFilesReverse {
+public:
+    using container = std::map<std::chrono::system_clock::time_point,
+                               std::unique_ptr<Logfile>>;
+    using const_iterator = container::const_iterator;
+
+    explicit LogFilesReverse(const container &log_files)
+        : log_files_{log_files} {}
+    [[nodiscard]] auto begin() const { return log_files_.rbegin(); }
+    [[nodiscard]] auto end() const { return log_files_.rend(); }
+
+private:
+    const container &log_files_;
+};
 
 // TODO(sp) Split this class into 2 parts: One is really only a cache for the
 // logfiles to monitor, the other part is about the lines in them.
 class LogCache {
 public:
-    using key_type = std::chrono::system_clock::time_point;
-    using mapped_type = std::unique_ptr<Logfile>;
-    using map_type = std::map<key_type, mapped_type>;
-    using iterator = map_type::iterator;
-    using const_iterator = map_type::const_iterator;
-
-    // TODO(sp) Using this class requires a very tricky and fragile protocol:
-    // You have to get the lock and call update() before you use any of the
-    // other methods. Furthermore, the constructor is not allowed to call any
-    // method of the MonitoringCore it gets, because there is a knot between the
-    // Store and the NagiosCore classes, so the MonitoringCore is not yet fully
-    // constructed. :-P
-
-    // Used internally and to guard the execution of TableLog::answerQuery() and
-    // TableStateHistory::answerQuery(). StateHistoryThread::run() uses this,
-    // too.
-    std::mutex _lock;
+    // TODO(sp) The constructor is not allowed to call any method of the
+    // MonitoringCore it gets, because there is a knot between the Store and the
+    // NagiosCore classes, so the MonitoringCore is not yet fully constructed.
+    // :-P
 
     // Used by Store::Store(), which owns the single instance of it in
     // Store::_log_cached. It passes this instance to TableLog::TableLog() and
@@ -45,35 +63,38 @@ public:
     // constructs its own instance.
     explicit LogCache(MonitoringCore *mc);
 
-    // Used internally and by TableLog::answerQuery() and
-    // TableStateHistory::answerQuery(). StateHistoryThread::run() uses this,
-    // too. Always guarded by _lock.
-    void update();
+    // Call the given function with a locked and updated LogCache, keeping the
+    // lock and the update function local.
+    template <class F>
+    inline auto apply(F f) {
+        std::lock_guard<std::mutex> lg(_lock);
+        update();
+        return f(LogFiles{_logfiles});
+    }
 
-    // Used by Store::numCachedLogMessages(), uses _lock for itself.
-    [[nodiscard]] size_t numCachedLogMessages();
+    // Call the given function with a locked and updated LogCache, keeping the
+    // lock and the update function local. Reverse version.
+    template <class F>
+    inline auto applyReverse(F f) {
+        std::lock_guard<std::mutex> lg(_lock);
+        update();
+        return f(LogFilesReverse{_logfiles});
+    }
 
     // Used by Logfile::loadRange()
     void logLineHasBeenAdded(Logfile *logfile, unsigned logclasses);
 
-    // Used by TableLog::answerQuery() and TableStateHistory::answerQuery().
-    // StateHistoryThread::run() uses this, too.
-    [[nodiscard]] bool empty() const { return _logfiles.empty(); }
-
-    // Used by TableLog::answerQuery(), TableStateHistory::answerQuery(),
-    // TableStateHistory::getPreviousLogentry(),
-    // TableStateHistory::getNextLogentry(), and StateHistoryThread::run()
-    auto begin() { return _logfiles.begin(); }
-    auto end() { return _logfiles.end(); }
-
 private:
     MonitoringCore *const _mc;
+    std::mutex _lock;
     size_t _num_cached_log_messages;
     size_t _num_at_last_check;
-    LogCache::map_type _logfiles;
+    std::map<std::chrono::system_clock::time_point, std::unique_ptr<Logfile>>
+        _logfiles;
     std::chrono::system_clock::time_point _last_index_update;
 
-    void addToIndex(mapped_type logfile);
+    void update();
+    void addToIndex(std::unique_ptr<Logfile> logfile);
     [[nodiscard]] Logger *logger() const;
 };
 

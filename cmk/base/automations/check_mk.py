@@ -22,10 +22,9 @@ from typing import Any, cast, Dict, List, Mapping, Optional, Sequence, Tuple, Un
 import cmk.utils.debug
 import cmk.utils.log as log
 import cmk.utils.man_pages as man_pages
-from cmk.utils.check_utils import maincheckify
 from cmk.utils.diagnostics import deserialize_cl_parameters, DiagnosticsCLParameters
 from cmk.utils.encoding import ensure_str_with_fallback
-from cmk.utils.exceptions import MKBailOut, MKGeneralException, OnError
+from cmk.utils.exceptions import MKBailOut, MKGeneralException, MKSNMPError, OnError
 from cmk.utils.labels import DiscoveredHostLabelsStore
 from cmk.utils.macros import replace_macros_in_str
 from cmk.utils.parameters import TimespecificParameters
@@ -220,7 +219,9 @@ class AutomationTryDiscovery(Automation):
 
     def _execute_discovery(
         self, args: List[str]
-    ) -> Tuple[discovery.CheckPreviewTable, discovery.QualifiedDiscovery[HostLabel]]:
+    ) -> Tuple[
+        Sequence[automation_results.CheckPreviewEntry], discovery.QualifiedDiscovery[HostLabel]
+    ]:
 
         use_cached_snmp_data = False
         if args[0] == "@noscan":
@@ -505,33 +506,33 @@ class AutomationRenameHosts(Automation):
         actions = []
 
         # Temporarily stop processing of performance data
-        npcd_running = os.path.exists(omd_root + "/tmp/pnp4nagios/run/npcd.pid")
+        npcd_running = (omd_root / "tmp/pnp4nagios/run/npcd.pid").exists()
         if npcd_running:
             os.system("omd stop npcd >/dev/null 2>&1 </dev/null")
 
-        rrdcache_running = os.path.exists(omd_root + "/tmp/run/rrdcached.sock")
+        rrdcache_running = (omd_root / "tmp/run/rrdcached.sock").exists()
         if rrdcache_running:
             os.system("omd stop rrdcached >/dev/null 2>&1 </dev/null")
 
         try:
             # Fix pathnames in XML files
             self.rename_host_in_files(
-                os.path.join(omd_root, "var/pnp4nagios/perfdata", oldname, "*.xml"),
+                str(omd_root / "var/pnp4nagios/perfdata" / oldname / "*.xml"),
                 "/perfdata/%s/" % oldregex,
                 "/perfdata/%s/" % newname,
             )
 
             # RRD files
-            if self._rename_host_dir(omd_root + "/var/pnp4nagios/perfdata", oldname, newname):
+            if self._rename_host_dir(str(omd_root / "var/pnp4nagios/perfdata"), oldname, newname):
                 actions.append("rrd")
 
             # RRD files
-            if self._rename_host_dir(omd_root + "/var/check_mk/rrd", oldname, newname):
+            if self._rename_host_dir(str(omd_root / "var/check_mk/rrd"), oldname, newname):
                 actions.append("rrd")
 
             # entries of rrdcached journal
             if self.rename_host_in_files(
-                os.path.join(omd_root, "var/rrdcached/rrd.journal.*"),
+                str(omd_root / "var/rrdcached/rrd.journal.*"),
                 "/(perfdata|rrd)/%s/" % oldregex,
                 "/\\1/%s/" % newname,
                 extended_regex=True,
@@ -714,15 +715,13 @@ class AutomationAnalyseServices(Automation):
         # 1. Manual checks
         # If we used the check table here, we would end up with the
         # *effective* parameters, these are the *configured* ones.
-        for checkgroup_name, checktype, item, params in host_config.static_checks:
-            # TODO (mo): centralize maincheckify: CMK-4295
-            check_plugin_name = CheckPluginName(maincheckify(checktype))
+        for checkgroup_name, check_plugin_name, item, params in host_config.static_checks:
             descr = config.service_description(hostname, check_plugin_name, item)
             if descr == servicedesc:
                 return {
                     "origin": "static",
                     "checkgroup": checkgroup_name,
-                    "checktype": checktype,
+                    "checktype": str(check_plugin_name),
                     "item": item,
                     "parameters": TimespecificParameters((params,)).preview(
                         cmk.base.core.timeperiod_active
@@ -754,7 +753,7 @@ class AutomationAnalyseServices(Automation):
             for plugin_name, entries in host_config.active_checks:
                 for active_check_params in entries:
                     description = config.active_check_service_description(
-                        hostname, plugin_name, active_check_params
+                        hostname, host_config.alias, plugin_name, active_check_params
                     )
                     if description == servicedesc:
                         return {
@@ -953,13 +952,14 @@ class AutomationDeleteHostsKnownRemote(ABCDeleteHosts, Automation):
             "%s/%s" % (counters_dir, hostname),
             "%s/%s" % (tcp_cache_dir, hostname),
             "%s/persisted/%s" % (var_dir, hostname),
+            "%s/inventory/%s" % (var_dir, hostname),
+            "%s/inventory/%s.gz" % (var_dir, hostname),
         ]
 
     def _delete_host_files(self, hostname: HostName) -> None:
         """
         The following locations are skipped on local sites for hosts only known
         on remote sites:
-        - var/check_mk/inventory
         - var/check_mk/agent_deployment
         - var/check_mk/agents
         """
@@ -1023,14 +1023,14 @@ class AutomationRestart(Automation):
 
     def _time_of_last_core_restart(self) -> float:
         if config.monitoring_core == "cmc":
-            pidfile_path = omd_root + "/tmp/run/cmc.pid"
+            pidfile_path = omd_root / "tmp/run/cmc.pid"
         else:
-            pidfile_path = omd_root + "/tmp/lock/nagios.lock"
+            pidfile_path = omd_root / "tmp/lock/nagios.lock"
 
-        if os.path.exists(pidfile_path):
-            return os.stat(pidfile_path).st_mtime
-
-        return 0.0
+        try:
+            return pidfile_path.stat().st_mtime
+        except FileNotFoundError:
+            return 0.0
 
 
 automations.register(AutomationRestart())
@@ -1280,6 +1280,10 @@ class AutomationDiagHost(Automation):
                 )
 
             if test.startswith("snmp"):
+                if config.simulation_mode:
+                    raise MKSNMPError(
+                        "Simulation mode enabled. Not trying to contact snmp datasource"
+                    )
                 return automation_results.DiagHostResult(
                     *self._execute_snmp(
                         test,
@@ -1542,7 +1546,9 @@ class AutomationActiveCheck(Automation):
         # (used e.g. by check_http)
         with plugin_contexts.current_host(hostname):
             for params in dict(host_config.active_checks).get(plugin, []):
-                description = config.active_check_service_description(hostname, plugin, params)
+                description = config.active_check_service_description(
+                    hostname, host_config.alias, plugin, params
+                )
                 if description != item:
                     continue
 
@@ -1562,7 +1568,7 @@ class AutomationActiveCheck(Automation):
 
     def _load_resource_file(self, macros: Dict[str, str]) -> None:
         try:
-            for line in open(omd_root + "/etc/nagios/resource.cfg"):
+            for line in (omd_root / "etc/nagios/resource.cfg").open():
                 line = line.strip()
                 if not line or line[0] == "#":
                     continue
